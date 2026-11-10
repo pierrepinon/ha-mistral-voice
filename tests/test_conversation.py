@@ -99,10 +99,16 @@ def make_conversation_input(
 
 
 def make_chat_response(
-    content: str | None = None, tool_calls: list | None = None
+    content: str | list | None = None, tool_calls: list | None = None
 ) -> SimpleNamespace:
-    """Réponse chat/completions en object-SDK (SimpleNamespace suffisant)."""
-    message = SimpleNamespace(content=content or "", tool_calls=tool_calls)
+    """Réponse chat/completions en object-SDK (SimpleNamespace suffisant).
+
+    `content` accepte aussi une liste de parties typées (modèles
+    raisonnement hébergés, ex. `zai-glm-5-3-flash`).
+    """
+    message = SimpleNamespace(
+        content="" if content is None else content, tool_calls=tool_calls
+    )
     return SimpleNamespace(
         choices=[SimpleNamespace(message=message, finish_reason="stop")]
     )
@@ -470,6 +476,75 @@ async def test_tool_execution_failure_gives_error_content_to_model(
     assert result.response.speech["plain"]["speech"] == (
         "Je n'ai pas réussi à faire l'action."
     )
+
+
+async def test_reasoning_model_content_parts_spoken(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Modèles raisonnement hébergés : `content` en liste de parties typées.
+
+    Seules les parties `text` sont conservées (concaténées dans l'ordre) ;
+    les parties raisonnement ne sont jamais parlées.
+    """
+    content = [
+        {"type": "reasoning", "text": "L'utilisateur demande l'heure…"},
+        {"type": "text", "text": "Il est "},
+        {"type": "text", "text": "23 h 17."},
+    ]
+    chat = ChatMock([make_chat_response(content=content)])
+    monkeypatch.setattr(conv, "async_chat_complete", chat)
+
+    result = await agent.async_process(make_conversation_input())
+
+    assert result.response.speech["plain"]["speech"] == "Il est 23 h 17."
+    assert result.response.response_type is intent.IntentResponseType.ACTION_DONE
+
+
+async def test_reasoning_model_content_parts_replayed_as_text(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Dans la boucle tool calling, l'assistant est rejoué en texte normalisé.
+
+    La liste de parties ne peut pas repartir telle quelle vers Mistral :
+    le message assistant rejoué porte le texte concaténé des parties text.
+    """
+    content = [
+        {"type": "text", "text": "Je regarde la lampe."},
+        {"type": "reasoning", "text": "…"},
+    ]
+    chat = ChatMock(
+        [
+            make_chat_response(
+                content=content,
+                tool_calls=[make_tool_call("call_p", "HassTurnOn", {"name": "Lampe"})],
+            ),
+            make_chat_response(content="C'est allumé."),
+        ]
+    )
+    monkeypatch.setattr(conv, "async_chat_complete", chat)
+
+    result = await agent.async_process(make_conversation_input())
+
+    replayed = chat.calls[1]["messages"][2]
+    assert replayed["role"] == "assistant"
+    assert replayed["content"] == "Je regarde la lampe."
+    assert result.response.speech["plain"]["speech"] == "C'est allumé."
+
+
+async def test_content_without_text_parts_returns_polite_error(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Une liste de parties sans aucun `text` reste une réponse vide → polie."""
+    content = [{"type": "reasoning", "text": "je réfléchis…"}]
+    chat = ChatMock([make_chat_response(content=content)])
+    monkeypatch.setattr(conv, "async_chat_complete", chat)
+
+    result = await agent.async_process(make_conversation_input())
+
+    # Texte de repli poli ; le pipeline voit un ACTION_DONE (seule la
+    # branche d'exception de async_process type la réponse en ERROR).
+    assert result.response.speech["plain"]["speech"] == ERROR_RESPONSE_TEXT
+    assert result.response.response_type is intent.IntentResponseType.ACTION_DONE
 
 
 # --------------------------------------- enregistrement au setup / unload

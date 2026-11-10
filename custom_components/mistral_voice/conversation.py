@@ -342,9 +342,26 @@ def _finish_reason(response: Any) -> str:
 
 
 def _message_content(message: Any) -> str:
-    """Contenu texte d'un message (str vide si absent)."""
+    """Contenu texte d'un message (str vide si absent).
+
+    Certains modèles hébergés (ex. `zai-glm-5-3-flash`, raisonnement/
+    multimodal) renvoient `content` sous forme d'une **liste de parties
+    typées** au lieu d'une chaîne : les parties texte sont concaténées,
+    les autres (raisonnement, etc.) sont ignorées — jamais parlées ni
+    renvoyées au modèle en message suivant.
+    """
     content = _field(message, "content")
-    return content if isinstance(content, str) else ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if _field(part, "type") == "text":
+                text = _field(part, "text")
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return "".join(text_parts)
+    return ""
 
 
 def _message_tool_calls(message: Any) -> list[dict[str, Any]]:
