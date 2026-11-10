@@ -1,7 +1,7 @@
 # Mistral Voice
 
 ![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge&logo=homeassistantcommunitystore)
-![Version](https://img.shields.io/badge/version-1.0.1-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.0.2-blue.svg?style=for-the-badge)
 ![Licence](https://img.shields.io/badge/licence-Apache%202.0-blue.svg?style=for-the-badge)
 
 [![Ouvrir dans HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pierrepinon&repository=ha-mistral-voice&category=integration)

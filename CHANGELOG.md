@@ -4,6 +4,23 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.0.2] — Réponses en liste de parties (modèles raisonnement)
+
+### Corrigé
+
+- Les modèles raisonnement hébergés par Mistral (ex.
+  `zai-glm-5-3-flash`) renvoient `message.content` sous forme d'une
+  **liste de parties typées** au lieu d'une chaîne : le texte de la
+  réponse était perdu et remplacé par la réponse d'erreur polie
+  (« Désolé, je n'ai pas réussi à traiter votre demande… »).
+  `_message_content` concatène désormais les parties de type `text` et
+  ignore les autres (le raisonnement n'est jamais parlé ni renvoyé au
+  modèle, que l'API Mistral rejette) ; dans la boucle de tool calling,
+  le message assistant est rejoué en texte normalisé. Comportement
+  inchangé pour les modèles renvoyant une simple chaîne.
+- Trois nouveaux tests : parties texte parlées (raisonnement ignoré),
+  replay assistant normalisé, repli poli sans aucune partie texte.
+
 ## [1.0.1] — Diagnostic du chemin conversation
 
 ### Ajouté
