@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Checkout de home-assistant/core (2026.10.4)
+        uses: actions/checkout@v4
+        with:
+          repository: home-assistant/core
+          ref: 2026.10.4
+          path: ha-core
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Installer homeassistant + dépendances hassfest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install homeassistant==2026.10.4
+          python -m pip install -r ha-core/requirements.txt
+
+      - name: Hassfest (validate)
+        working-directory: ha-core
+        run: |
+          python script/hassfest --action validate \
+            --integration-path "${{ github.workspace }}/custom_components/mistral_voice"
+
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du dépôt
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Installer ruff (même version que .mise.toml)
+        run: python -m pip install ruff==0.17.4
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .

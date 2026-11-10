@@ -1,0 +1,28 @@
+# Fichiers Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environnements virtuels
+.venv/
+venv/
+
+# Outils
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Éditeurs / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Secrets éventuels en local — ne jamais committer
+.env
+.env.*

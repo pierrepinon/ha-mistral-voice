@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mistral Voice",
+        "description": "Saisissez votre clé API Mistral (elle est stockée chiffrée par Home Assistant et n'apparaît jamais dans les logs).",
+        "data": {
+          "api_key": "Clé API Mistral"
+        }
+      }
+    },
+    "error": {
+      "api_key_missing": "La clé API ne peut pas être vide."
+    },
+    "abort": {
+      "already_configured": "L'intégration Mistral Voice est déjà configurée."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options de Mistral Voice",
+        "description": "Configurez le modèle de chat, la langue de transcription, le délai de streaming et le pre-prompt. La liste des modèles est chargée depuis l'API Mistral (GET /v1/models).",
+        "data": {
+          "model": "Modèle de chat Mistral",
+          "language": "Langue de transcription",
+          "target_streaming_delay_ms": "Délai de streaming cible (ms)",
+          "system_prompt": "Pre-prompt système (vide = pré-prompt par défaut)",
+          "refresh_models": "Rafraîchir les modèles"
+        },
+        "data_description": {
+          "model": "Liste alimentée en direct par GET /v1/models (modèles de chat, alias « -latest » en premier) ; une valeur personnalisée peut être saisie.",
+          "refresh_models": "Cochez puis validez pour réinterroger la liste des modèles avant de réafficher ce formulaire."
+        }
+      }
+    },
+    "error": {
+      "invalid_language": "Langue non supportée.",
+      "delay_out_of_range": "Le délai de streaming doit être compris entre 80 et 2400 ms.",
+      "invalid_delay": "Le délai indiqué n'est pas un nombre valide.",
+      "models_fetch_failed": "Impossible de récupérer la liste des modèles depuis l'API Mistral (GET /v1/models). La valeur du modèle actuel est conservée."
+    }
+  },
+  "entity": {
+    "stt": {
+      "mistral_stt": {
+        "name": "Transcription (Mistral)"
+      }
+    }
+  }
+}
