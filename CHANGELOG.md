@@ -4,6 +4,20 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.0.1] — Diagnostic du chemin conversation
+
+### Ajouté
+
+- Instrumentation en log **debug** du chemin conversation de l'agent :
+  modèle sélectionné et nombre d'outils exposés en début d'énoncé, puis
+  à chaque itération de tool calling le `finish_reason`, le nombre de
+  `tool_calls` et la taille du contenu de réponse, et la taille du
+  résultat JSON de chaque outil exécuté. Permet de diagnostiquer en
+  direct le cas d'un modèle de raisonnement tronqué par `max_tokens`
+  (contenu vide, `finish_reason=length`) qui ne laissait jusqu'ici
+  **aucune trace** dans les logs. Jamais de secret ni de détail de
+  requête dans ces lignes (clé API, pre-prompt et texte brut exclus).
+
 ## [1.0.0] — MVP complet
 
 Première version complète de l'intégration `mistral_voice` : assistant vocal
