@@ -23,7 +23,9 @@ surtout jamais la clé API ne sortent de ce module.
 
 Les définitions d'outils converties et le pre-prompt actif sont mis en
 cache (réutilisation du même objet dict / même valeur lru) : les requêtes
-successives sont byte-stables.
+successives sont byte-stables. Le parcours est instrumenté en log debug
+(modèle, itération, finish_reason, tool_calls, tailles de contenu) pour
+permettre le diagnostic sans jamais y loguer de secret.
 """
 
 from __future__ import annotations
@@ -181,6 +183,13 @@ class MistralVoiceAgent(conversation.AbstractConversationAgent):
 
         converted_tools = [self.convert_tool(tool) for tool in api_instance.tools]
         tool_choice = TOOL_CHOICE_AUTO if converted_tools else None
+        _LOGGER.debug(
+            "Conversation %s : modèle %s, %d outils exposés, énoncé de %d caractères.",
+            user_input.agent_id,
+            model,
+            len(converted_tools),
+            len(user_input.text),
+        )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
@@ -188,7 +197,7 @@ class MistralVoiceAgent(conversation.AbstractConversationAgent):
         ]
 
         try:
-            for _ in range(MAX_TOOL_ITERATIONS):
+            for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
                 response = await async_chat_complete(
                     self.hass,
                     self.entry,
@@ -200,6 +209,16 @@ class MistralVoiceAgent(conversation.AbstractConversationAgent):
                 )
                 message = _first_message(response)
                 tool_calls = _message_tool_calls(message)
+                _LOGGER.debug(
+                    "Conversation %s : itération %d/%d, finish_reason=%s, "
+                    "%d tool_calls, contenu de %d caractères.",
+                    user_input.agent_id,
+                    iteration,
+                    MAX_TOOL_ITERATIONS,
+                    _finish_reason(response),
+                    len(tool_calls),
+                    len(_message_content(message)),
+                )
 
                 if not tool_calls:
                     return _result_with_speech(user_input, _message_content(message))
@@ -274,7 +293,11 @@ class MistralVoiceAgent(conversation.AbstractConversationAgent):
 
         data = _field(result, "data")
         data = data if data is not None else {}
-        return json.dumps(data, default=str)
+        content = json.dumps(data, default=str)
+        _LOGGER.debug(
+            "Outil %s : exécuté, résultat de %d caractères.", name, len(content)
+        )
+        return content
 
 
 def _parse_tool_args(raw_arguments: Any) -> dict[str, Any]:
@@ -303,6 +326,19 @@ def _first_message(response: Any) -> Any:
     if not choices:
         return None
     return _field(choices[0], "message")
+
+
+def _finish_reason(response: Any) -> str:
+    """`finish_reason` du premier choix de la réponse (vide si absent).
+
+    Informatif pour le diagnostic (réponse tronquée par `max_tokens` :
+    `length` avec un contenu vide, typique des modèles de raisonnement).
+    """
+    choices = _field(response, "choices") or []
+    if not choices:
+        return ""
+    reason = _field(choices[0], "finish_reason")
+    return reason if isinstance(reason, str) else ""
 
 
 def _message_content(message: Any) -> str:
