@@ -4,6 +4,22 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.3.0] — Option « Plafond de tokens par réponse »
+
+### Ajouté
+
+- **Nouvelle option « Plafond de tokens par réponse »** (`max_tokens`,
+  plage 64–4096, défaut 1024) dans le flow d'options : la valeur est
+  envoyée comme `max_tokens` à `POST /v1/chat/completions` au lieu de
+  la constante interne. Rappel : ce plafond est un filet de sécurité,
+  la concision des réponses vient du pre-prompt ; les modèles qui
+  raisonnent consomment leur réflexion dans ce budget avant le
+  premier token de texte (d'où le défaut relevé en 1.2.1).
+- Validation du champ (plage, entier) avec erreur de formulaire
+  traduite `max_tokens_out_of_range`.
+- Le paramètre `reasoning_effort` du SDK reste non exposé : chaque
+  modèle applique son réglage de raisonnement par défaut.
+
 ## [1.2.1] — Synthèse vocale : voix de repli obligatoire
 
 ### Corrigé

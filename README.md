@@ -1,7 +1,7 @@
 # Mistral Voice
 
 ![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge&logo=homeassistantcommunitystore)
-![Version](https://img.shields.io/badge/version-1.2.1-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.3.0-blue.svg?style=for-the-badge)
 ![Licence](https://img.shields.io/badge/licence-Apache%202.0-blue.svg?style=for-the-badge)
 
 [![Ouvrir dans HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pierrepinon&repository=ha-mistral-voice&category=integration)
@@ -104,6 +104,7 @@ Options → Mistral Voice :
 | **Rafraîchir les modèles** | décoché | Cocher puis valider pour réinterroger la liste des modèles sans enregistrer. |
 | **Langue de transcription** | `fr` | Langue passée à la session de transcription (`fr`, `en`, `de`, `es`, `it`) ; le fournisseur TTS ne sert que les pipelines dans cette langue. |
 | **Délai de streaming cible** | `480` | `target_streaming_delay_ms` en ms, plage **80–2400**. |
+| **Plafond de tokens par réponse** | `1024` | `max_tokens` envoyé à `POST /v1/chat/completions`, plage **64–4096**. Plafond de sécurité (la concision vient du pre-prompt) ; les modèles qui raisonnent consomment leur réflexion dans ce budget avant le texte. |
 | **Voix de synthèse vocale** | `voice_592` (Marie, fr) | Identifiant d'une voix Mistral (préréglée ou clonée) passé à `POST /v1/audio/speech`. Les modèles Voxtral TTS 3 refusent les requêtes sans voix : une option vide retombe sur la voix de repli intégrée. |
 | **Pre-prompt système** | (vide = pre-prompt français intégré) | Surcharge du pre-prompt par défaut. |
 
@@ -165,7 +166,7 @@ conversation Home Assistant) est interrogé par le pipeline Assist :
    (`{"type": "function", "function": {…}}`) — le mécanisme d'outils de HA
    n'est pas réimplémenté.
 3. Un appel `POST /v1/chat/completions` **en flux SSE** est fait avec le
-   pre-prompt et les outils, `tool_choice="auto"`, `max_tokens` plafonné à 1024 (plafond de sécurité, la concision vient du pre-prompt) ;
+   pre-prompt et les outils, `tool_choice="auto"`, `max_tokens` selon l'option « Plafond de tokens par réponse » (plafond de sécurité, la concision vient du pre-prompt) ;
    les deltas de contenu sont poussés dans le `ChatLog` et peuvent être
    diffusés au TTS au fur et à mesure (l'agent déclare
    `supports_streaming`).
@@ -333,7 +334,8 @@ serveur ◀── transcription.done       (texte complet, langue, usage)
   - `tools` / `tool_choice="auto"` : outils Assist de HA convertis au
     schéma `{"type": "function", "function": {"name", "description",
     "parameters"}}` (JSON Schema des paramètres) ;
-  - `max_tokens` : plafond de sécurité à 1024 (la concision vient du pre-prompt).
+  - `max_tokens` : plafond de sécurité, option « Plafond de tokens par
+    réponse » (64–4096, défaut 1024 — la concision vient du pre-prompt).
 - Boucle de tool calling : deltas `tool_calls` (arguments assemblés par
   index) → exécution côté HA via l'API LLM → messages
   `{"role": "tool", "tool_call_id", "content"}` → nouvel appel,

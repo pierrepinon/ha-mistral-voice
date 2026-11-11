@@ -32,15 +32,16 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.mistral_voice import conversation as conv
 from custom_components.mistral_voice.api import MistralApiError
 from custom_components.mistral_voice.const import (
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_SYSTEM_PROMPT,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     DOMAIN,
     ERROR_LOOP_LIMIT_TEXT,
     ERROR_RESPONSE_TEXT,
     MAX_HISTORY_MESSAGES,
-    MAX_TOKENS,
 )
 from custom_components.mistral_voice.conversation import MistralVoiceAgentEntity
 
@@ -493,7 +494,7 @@ async def test_chat_call_parameters(
     await process(hass, agent, make_conversation_input())
 
     call = chat.calls[0]
-    assert call["max_tokens"] == MAX_TOKENS
+    assert call["max_tokens"] == DEFAULT_MAX_TOKENS
     assert call["tool_choice"] == "auto"
     assert call["model"] == DEFAULT_MODEL
 
@@ -511,6 +512,23 @@ async def test_options_override_model(
     await process(hass, agent, make_conversation_input())
 
     assert chat.calls[0]["model"] == "mon-model-custom"
+
+
+async def test_options_override_max_tokens(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """L'option `max_tokens` prime sur la valeur par défaut (plafond)."""
+    custom_max_tokens = 2048
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_MAX_TOKENS: custom_max_tokens, CONF_MODEL: "mon-model-custom"},
+    )
+    chat = ChatStreamMock([[make_delta(content="ok")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
+
+    await process(hass, agent, make_conversation_input())
+
+    assert chat.calls[0]["max_tokens"] == custom_max_tokens
 
 
 # -------------------------------------------------------------- pre-prompt

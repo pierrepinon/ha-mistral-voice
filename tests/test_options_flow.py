@@ -28,18 +28,22 @@ from custom_components.mistral_voice.config_flow import (
 )
 from custom_components.mistral_voice.const import (
     CONF_LANGUAGE,
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_REFRESH_MODELS,
     CONF_STREAMING_DELAY_MS,
     CONF_SYSTEM_PROMPT,
     CONF_VOICE,
     DEFAULT_LANGUAGE,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_STREAMING_DELAY_MS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_VOICE,
     DOMAIN,
+    MAX_MAX_TOKENS,
     MAX_STREAMING_DELAY_MS,
+    MIN_MAX_TOKENS,
     MIN_STREAMING_DELAY_MS,
 )
 
@@ -155,6 +159,7 @@ def _defaults() -> dict[str, Any]:
         CONF_SYSTEM_PROMPT: "",
         CONF_MODEL: DEFAULT_MODEL,
         CONF_VOICE: DEFAULT_VOICE,
+        CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS,
     }
 
 
@@ -178,6 +183,7 @@ async def test_options_form_shows_defaults(hass: HomeAssistant) -> None:
     assert schema_map[CONF_STREAMING_DELAY_MS].default() == DEFAULT_STREAMING_DELAY_MS
     assert schema_map[CONF_SYSTEM_PROMPT].default() == ""
     assert schema_map[CONF_VOICE].default() == DEFAULT_VOICE
+    assert schema_map[CONF_MAX_TOKENS].default() == DEFAULT_MAX_TOKENS
     assert schema_map[CONF_REFRESH_MODELS].default() is False
 
 
@@ -198,6 +204,7 @@ async def test_options_defaults_saved(hass: HomeAssistant) -> None:
     assert entry.options[CONF_SYSTEM_PROMPT] == ""
     assert entry.options[CONF_MODEL] == DEFAULT_MODEL
     assert entry.options[CONF_VOICE] == DEFAULT_VOICE
+    assert entry.options[CONF_MAX_TOKENS] == DEFAULT_MAX_TOKENS
     # La case de rafraîchissement n'est jamais persistée.
     assert CONF_REFRESH_MODELS not in entry.options
 
@@ -216,6 +223,7 @@ async def test_options_override_saved(hass: HomeAssistant) -> None:
                 CONF_SYSTEM_PROMPT: "Réponds très brièvement.",
                 CONF_MODEL: "mistral-large-latest",
                 CONF_VOICE: "voice-42",
+                CONF_MAX_TOKENS: 512,
             },
         )
         await hass.async_block_till_done()
@@ -227,6 +235,7 @@ async def test_options_override_saved(hass: HomeAssistant) -> None:
         CONF_SYSTEM_PROMPT: "Réponds très brièvement.",
         CONF_MODEL: "mistral-large-latest",
         CONF_VOICE: "voice-42",
+        CONF_MAX_TOKENS: 512,
     }
 
 
@@ -489,7 +498,11 @@ def test_validate_options_bounds_accepted() -> None:
         MAX_STREAMING_DELAY_MS,
     ):
         errors = _validate_options(
-            {CONF_LANGUAGE: DEFAULT_LANGUAGE, CONF_STREAMING_DELAY_MS: delay}
+            {
+                CONF_LANGUAGE: DEFAULT_LANGUAGE,
+                CONF_STREAMING_DELAY_MS: delay,
+                CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS,
+            }
         )
         assert errors == {}, delay
 
@@ -507,18 +520,79 @@ def test_validate_options_delay_out_of_range_rejected() -> None:
         "",
     ):
         errors = _validate_options(
-            {CONF_LANGUAGE: DEFAULT_LANGUAGE, CONF_STREAMING_DELAY_MS: delay}
+            {
+                CONF_LANGUAGE: DEFAULT_LANGUAGE,
+                CONF_STREAMING_DELAY_MS: delay,
+                CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS,
+            }
         )
         assert errors == {"target_streaming_delay_ms": "delay_out_of_range"}, delay
 
 
 def test_validate_options_missing_delay_rejected() -> None:
     """Absence du champ : erreur `delay_out_of_range` (valeur requise)."""
-    errors = _validate_options({CONF_LANGUAGE: DEFAULT_LANGUAGE})
+    errors = _validate_options(
+        {CONF_LANGUAGE: DEFAULT_LANGUAGE, CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS}
+    )
     assert errors == {CONF_STREAMING_DELAY_MS: "delay_out_of_range"}
 
 
 def test_validate_options_invalid_language_rejected() -> None:
     """Langue inconnue : erreur `invalid_language`."""
-    errors = _validate_options({CONF_LANGUAGE: "klingon", CONF_STREAMING_DELAY_MS: 480})
+    errors = _validate_options(
+        {
+            CONF_LANGUAGE: "klingon",
+            CONF_STREAMING_DELAY_MS: 480,
+            CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS,
+        }
+    )
     assert errors == {CONF_LANGUAGE: "invalid_language"}
+
+
+def test_validate_options_max_tokens_bounds_accepted() -> None:
+    """Les bornes (64 et 4096) et une valeur médiane sont acceptées."""
+    for tokens in (
+        MIN_MAX_TOKENS,
+        MIN_MAX_TOKENS + 1,
+        1024,
+        MAX_MAX_TOKENS - 1,
+        MAX_MAX_TOKENS,
+    ):
+        errors = _validate_options(
+            {
+                CONF_LANGUAGE: DEFAULT_LANGUAGE,
+                CONF_STREAMING_DELAY_MS: 480,
+                CONF_MAX_TOKENS: tokens,
+            }
+        )
+        assert errors == {}, tokens
+
+
+def test_validate_options_max_tokens_out_of_range_rejected() -> None:
+    """Hors de la plage [64, 4096] (ou non convertible) : erreur de formulaire."""
+    for tokens in (
+        0,
+        16,
+        MIN_MAX_TOKENS - 1,
+        -64,
+        MAX_MAX_TOKENS + 1,
+        10000,
+        "abc",
+        "",
+    ):
+        errors = _validate_options(
+            {
+                CONF_LANGUAGE: DEFAULT_LANGUAGE,
+                CONF_STREAMING_DELAY_MS: 480,
+                CONF_MAX_TOKENS: tokens,
+            }
+        )
+        assert errors == {"max_tokens": "max_tokens_out_of_range"}, tokens
+
+
+def test_validate_options_missing_max_tokens_rejected() -> None:
+    """Absence du champ : erreur `max_tokens_out_of_range` (valeur requise)."""
+    errors = _validate_options(
+        {CONF_LANGUAGE: DEFAULT_LANGUAGE, CONF_STREAMING_DELAY_MS: 480}
+    )
+    assert errors == {CONF_MAX_TOKENS: "max_tokens_out_of_range"}

@@ -53,15 +53,16 @@ import probatio
 from .api import MistralApiError, MistralVoiceData, async_chat_complete_stream
 from .config_flow import resolve_system_prompt
 from .const import (
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_SYSTEM_PROMPT,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DOMAIN,
     ERROR_LOOP_LIMIT_TEXT,
     ERROR_RESPONSE_TEXT,
     MANUFACTURER,
     MAX_HISTORY_MESSAGES,
-    MAX_TOKENS,
     MAX_TOOL_ITERATIONS,
     TOOL_CHOICE_AUTO,
 )
@@ -349,6 +350,7 @@ class MistralVoiceAgentEntity(conversation.ConversationEntity):
         s'arrête quand la dernière réponse ne demande plus d'outil.
         """
         model = str(self.entry.options.get(CONF_MODEL) or DEFAULT_MODEL)
+        max_tokens = int(self.entry.options.get(CONF_MAX_TOKENS) or DEFAULT_MAX_TOKENS)
         messages = _cap_history(_convert_content_to_messages(chat_log.content))
 
         converted_tools: list[dict[str, Any]] = []
@@ -367,7 +369,7 @@ class MistralVoiceAgentEntity(conversation.ConversationEntity):
                 messages=messages,
                 tools=converted_tools or None,
                 tool_choice=tool_choice,
-                max_tokens=MAX_TOKENS,
+                max_tokens=max_tokens,
             )
             contents: list[conversation.Content] = []
             async for content in chat_log.async_add_delta_content_stream(

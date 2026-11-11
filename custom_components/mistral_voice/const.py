@@ -15,6 +15,7 @@ CONF_STREAMING_DELAY_MS = "target_streaming_delay_ms"
 CONF_SYSTEM_PROMPT = "system_prompt"
 CONF_MODEL = "model"
 CONF_VOICE = "voice"
+CONF_MAX_TOKENS = "max_tokens"
 CONF_REFRESH_MODELS = "refresh_models"
 
 DEFAULT_LANGUAGE = "fr"
@@ -63,12 +64,14 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 # Conversation : appels POST /v1/chat/completions en flux (SSE, SDK async).
-# Plafond de sécurité uniquement — la concision vient du pre-prompt. Il
+# Plafond de sécurité par réponse — la concision vient du pre-prompt. Il
 # doit laisser la place au raisonnement des modèles qui raisonnent dans
 # le même budget (leurs tokens de réflexion précèdent le texte parlé) ;
-# à 150, un tour de raisonnement suffisamment long produisait une
-# réponse sans aucun texte -> réponse polie d'erreur.
-MAX_TOKENS = 1024
+# un plafond trop bas produit une réponse sans aucun texte -> réponse
+# polie d'erreur. Valeur configurable dans les options (`max_tokens`).
+DEFAULT_MAX_TOKENS = 1024
+MIN_MAX_TOKENS = 64
+MAX_MAX_TOKENS = 4096
 TOOL_CHOICE_AUTO = "auto"
 
 # Boucle de tool calling : nombre max d'allers-retours avec le modèle,

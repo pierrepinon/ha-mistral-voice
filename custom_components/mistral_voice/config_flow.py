@@ -31,18 +31,22 @@ from . import api
 from .const import (
     CONF_API_KEY,
     CONF_LANGUAGE,
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_REFRESH_MODELS,
     CONF_STREAMING_DELAY_MS,
     CONF_SYSTEM_PROMPT,
     CONF_VOICE,
     DEFAULT_LANGUAGE,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_STREAMING_DELAY_MS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_VOICE,
     DOMAIN,
+    MAX_MAX_TOKENS,
     MAX_STREAMING_DELAY_MS,
+    MIN_MAX_TOKENS,
     MIN_STREAMING_DELAY_MS,
     SUPPORTED_LANGUAGES,
 )
@@ -124,6 +128,18 @@ def _options_schema(
                 CONF_VOICE, default=current.get(CONF_VOICE, DEFAULT_VOICE)
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
+                CONF_MAX_TOKENS,
+                default=current.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=MIN_MAX_TOKENS,
+                    max=MAX_MAX_TOKENS,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="tokens",
+                )
+            ),
+            vol.Required(
                 CONF_SYSTEM_PROMPT, default=current.get(CONF_SYSTEM_PROMPT, "")
             ): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
@@ -145,6 +161,7 @@ def _normalise_options(user_input: Mapping[str, Any]) -> dict[str, Any]:
         CONF_SYSTEM_PROMPT: str(user_input.get(CONF_SYSTEM_PROMPT) or ""),
         CONF_MODEL: str(user_input.get(CONF_MODEL) or DEFAULT_MODEL),
         CONF_VOICE: str(user_input.get(CONF_VOICE) or ""),
+        CONF_MAX_TOKENS: int(user_input.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)),
     }
 
 
@@ -171,6 +188,22 @@ def _validate_options(user_input: Mapping[str, Any]) -> dict[str, str]:
         else:
             if not MIN_STREAMING_DELAY_MS <= delay <= MAX_STREAMING_DELAY_MS:
                 errors[CONF_STREAMING_DELAY_MS] = "delay_out_of_range"
+
+    tokens_raw = user_input.get(CONF_MAX_TOKENS)
+    if (
+        tokens_raw is None
+        or isinstance(tokens_raw, bool)
+        or not isinstance(tokens_raw, (int, float, str))
+    ):
+        errors[CONF_MAX_TOKENS] = "max_tokens_out_of_range"
+    else:
+        try:
+            tokens = int(tokens_raw)
+        except ValueError:
+            errors[CONF_MAX_TOKENS] = "max_tokens_out_of_range"
+        else:
+            if not MIN_MAX_TOKENS <= tokens <= MAX_MAX_TOKENS:
+                errors[CONF_MAX_TOKENS] = "max_tokens_out_of_range"
 
     return errors
 
