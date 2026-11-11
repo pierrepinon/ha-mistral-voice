@@ -1,22 +1,30 @@
-"""Tests de l'agent de conversation Mistral (ticket #6).
+"""Tests de l'entité agent de conversation Mistral (ChatLog + flux).
 
-Mocks : client chat (`api.async_chat_complete`) et API LLM Assist de HA
-(`llm.async_get_api` / `api_instance.async_call_tool`). Clé API factice
-uniquement ; la conversion de schéma, la boucle tool calling, le cap de
-max_tokens, le pre-prompt, le cache byte-stable et l'erreur polie sont
-vérifiés. Intégration légère : enregistrement / désenregistrement de
-l'agent auprès du Pipeline Assist (async_get_agent / unset).
+Architecture testée (Home Assistant 2026.10) : l'agent est une
+`ConversationEntity` dont `_async_handle_message` reçoit un `ChatLog`
+persistant par conversation — la **mémoire multi-tours** — et diffuse
+les deltas de la réponse en flux (`chat_log.async_add_delta_content_stream`),
+ce qui alimente le TTS du pipeline au fil de l'eau.
+
+Mocks : client chat en flux (`async_chat_complete_stream`, itérateurs
+d'événements factices) et API LLM Assist (`llm.LLM_API_ASSIST.
+async_get_api_instance` remplaçée par une instance factice). Clé API
+factice uniquement ; la conversion de schéma, la boucle tool calling,
+le cap de `max_tokens`, le pre-prompt, le plafond d'historique, le
+streaming des deltas et l'erreur polie sont vérifiés. Intégration
+légère : enregistrement de l'agent au setup / retrait au unload.
 """
 
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 from homeassistant.components import conversation as ha_conversation
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Context
-from homeassistant.helpers import intent, llm
+from homeassistant.helpers import chat_session, entity_registry as er, intent, llm
 import probatio
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -31,19 +39,17 @@ from custom_components.mistral_voice.const import (
     DOMAIN,
     ERROR_LOOP_LIMIT_TEXT,
     ERROR_RESPONSE_TEXT,
+    MAX_HISTORY_MESSAGES,
     MAX_TOKENS,
 )
-from custom_components.mistral_voice.conversation import MistralVoiceAgent
+from custom_components.mistral_voice.conversation import MistralVoiceAgentEntity
 
 KEY_PLACEHOLDER = "placeholder-key-from-test"
 
 SPEAK_LANGUAGE = "fr"
 
-# Deux échanges chat/completions : un tool_call puis la réponse finale.
+# Deux tours de chat streaming : un tool_call puis la réponse finale.
 EXPECTED_CHAT_CALLS_AFTER_TOOL = 2
-
-# Cap max_token demandé par le ticket (~150 ; constante MAX_TOKENS).
-EXPECTED_MAX_TOKENS = 150
 
 
 # ---------------------------------------------------------------- fixtures
@@ -68,17 +74,69 @@ class FakeTool(llm.Tool):
         return llm.ToolResult(data={"turn_on": tool_input.tool_args})
 
 
-class FakeAPIInstance:
+class FakeApiInstance:
     """APIInstance LLM Assist de test."""
 
     def __init__(self, tools: list[llm.Tool]) -> None:
         self.tools = tools
+        self.custom_serializer = None
+        self.api_prompt = ""
         self.tool_calls: list[llm.ToolInput] = []
         self.tool_results: dict[str, dict] = {}
 
     async def async_call_tool(self, tool_input: llm.ToolInput) -> llm.ToolResult:
         self.tool_calls.append(tool_input)
         return llm.ToolResult(data=self.tool_results.get(tool_input.tool_name, {}))
+
+
+@pytest.fixture
+def api_instance() -> FakeApiInstance:
+    """Instance LLM Assist factice avec deux outils."""
+    return FakeApiInstance(
+        tools=[
+            FakeTool(
+                name="HassTurnOn",
+                description="Allume les entités cibles",
+                parameters=probatio.Schema(
+                    {"name": list[str], "area": probatio.Optional(str)}
+                ),
+            ),
+            FakeTool(name="HassGetState", description="Récupère un état"),
+        ]
+    )
+
+
+@pytest.fixture
+def fake_llm_api(monkeypatch, api_instance) -> FakeApiInstance:
+    """Brancher l'instance factice sur `llm.LLM_API_ASSIST`."""
+
+    async def fake_get_api(hass, api_id, llm_context):
+        assert api_id == llm.LLM_API_ASSIST
+        return api_instance
+
+    monkeypatch.setattr(llm, "async_get_api", fake_get_api)
+    return api_instance
+
+
+@pytest.fixture
+def entry(hass) -> MockConfigEntry:
+    """Entrée de configuration avec clé API factice."""
+    mock = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mistral Voice",
+        data={"api_key": KEY_PLACEHOLDER},
+    )
+    mock.add_to_hass(hass)
+    return mock
+
+
+@pytest.fixture
+def agent(hass, entry) -> MistralVoiceAgentEntity:
+    """Entité agent de conversation avec l'entrée de test."""
+    entity = MistralVoiceAgentEntity(entry)
+    entity.hass = hass
+    entity.entity_id = f"conversation.{DOMAIN}"
+    return entity
 
 
 def make_conversation_input(
@@ -98,88 +156,78 @@ def make_conversation_input(
     )
 
 
-def make_chat_response(
-    content: str | list | None = None, tool_calls: list | None = None
+def make_delta(
+    content: Any = None,
+    tool_calls: list | None = None,
+    role: str | None = None,
 ) -> SimpleNamespace:
-    """Réponse chat/completions en object-SDK (SimpleNamespace suffisant).
-
-    `content` accepte aussi une liste de parties typées (modèles
-    raisonnement hébergés, ex. `zai-glm-5-3-flash`).
-    """
-    message = SimpleNamespace(
-        content="" if content is None else content, tool_calls=tool_calls
-    )
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=message, finish_reason="stop")]
-    )
+    """Delta de chunk streaming Mistral (forme du SDK, champ optionnel)."""
+    return SimpleNamespace(content=content, tool_calls=tool_calls, role=role)
 
 
-def make_tool_call(call_id: str, name: str, args: dict | str) -> SimpleNamespace:
-    """ToolCall de test (arguments dict ou chaîne JSON, comme l'API)."""
+def make_tool_call_delta(
+    call_id: str, name: str, args: dict | str, index: int = 0
+) -> SimpleNamespace:
+    """ToolCall streaming de test (arguments assemblés par le transformeur)."""
     raw = args if isinstance(args, str) else json.dumps(args)
     return SimpleNamespace(
         id=call_id,
-        type="function",
+        index=index,
         function=SimpleNamespace(name=name, arguments=raw),
     )
 
 
-class ChatMock:
-    """Mock de `api.async_chat_complete` : réponses en file + appels gardés.
+def make_stream(deltas: list[SimpleNamespace]) -> Any:
+    """Flux SSE factice : réponses en file, appelées async chat stream."""
 
-    Une fois la file vide, la dernière réponse est répétée (permet de
-    tester la limite d'itérations avec un modèle qui déborde d'appels).
+    async def gen():
+        for delta in deltas:
+            yield SimpleNamespace(
+                data=SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+            )
+
+    return gen()
+
+
+class ChatStreamMock:
+    """Mock de `api.async_chat_complete_stream` : tours en file + appels gardés.
+
+    Chaque tour est une liste de deltas ; la dernière liste est répétée
+    quand la file est vide (test de la limite d'itérations).
     """
 
-    def __init__(self, responses: list) -> None:
-        self.responses = list(responses)
+    def __init__(self, rounds: list[list[SimpleNamespace]]) -> None:
+        self.rounds = list(rounds)
         self.calls: list[dict] = []
 
     async def __call__(self, hass, entry, **kwargs):
-        self.calls.append(kwargs)
-        index = min(len(self.calls) - 1, len(self.responses) - 1)
-        return self.responses[index]
+        # Copie profonde : la liste `messages` est étendue par l'agent
+        # entre les tours de la boucle (le mock ne doit pas capturer
+        # d'alias mutable sur les appels précédents).
+        self.calls.append(
+            {
+                **kwargs,
+                "messages": [dict(message) for message in kwargs["messages"]],
+                "tools": [dict(tool) for tool in (kwargs.get("tools") or [])],
+            }
+        )
+        index = min(len(self.calls) - 1, len(self.rounds) - 1)
+        return make_stream(self.rounds[index])
 
 
-@pytest.fixture
-def entry(hass) -> MockConfigEntry:
-    """Entrée de configuration avec clé API factice."""
-    mock = MockConfigEntry(
-        domain=DOMAIN,
-        title="Mistral Voice",
-        data={"api_key": KEY_PLACEHOLDER},
-    )
-    mock.add_to_hass(hass)
-    return mock
-
-
-@pytest.fixture
-def agent(hass, entry) -> MistralVoiceAgent:
-    """Agent de conversation avec l'entrée de test."""
-    return MistralVoiceAgent(hass, entry)
-
-
-@pytest.fixture
-def fake_llm_api(monkeypatch) -> FakeAPIInstance:
-    """Mock de `llm.async_get_api` : instance avec outils Assist."""
-    api_instance = FakeAPIInstance(
-        tools=[
-            FakeTool(
-                name="HassTurnOn",
-                description="Allume les entités cibles",
-                parameters=probatio.Schema(
-                    {"name": list[str], "area": probatio.Optional(str)}
-                ),
-            ),
-            FakeTool(name="HassGetState", description="Récupère un état"),
-        ]
-    )
-
-    async def fake_async_get_api(hass, api_id, llm_context):
-        return api_instance
-
-    monkeypatch.setattr(llm, "async_get_api", fake_async_get_api)
-    return api_instance
+async def process(
+    hass,
+    agent: MistralVoiceAgentEntity,
+    user_input: ha_conversation.ConversationInput,
+):
+    """Traiter un énoncé comme l'entité : session + ChatLog + message."""
+    with (
+        chat_session.async_get_chat_session(
+            hass, user_input.conversation_id
+        ) as session,
+        ha_conversation.async_get_chat_log(hass, session, user_input) as chat_log,
+    ):
+        return await agent._async_handle_message(user_input, chat_log)
 
 
 # ----------------------------------------------- conversion function-calling
@@ -189,10 +237,10 @@ async def test_tool_schema_conversion(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
     """Les outils llm.Tool sont convertis au schéma function-calling Mistral."""
-    chat = ChatMock([make_chat_response(content="C'est fait.")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock([[make_delta(content="C'est fait.")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    result = await agent.async_process(make_conversation_input())
+    result = await process(hass, agent, make_conversation_input())
 
     assert len(chat.calls) == 1
     tools = chat.calls[0]["tools"]
@@ -221,25 +269,29 @@ async def test_tool_schema_conversion(
 async def test_tool_call_loop(hass, entry, agent, fake_llm_api, monkeypatch) -> None:
     """1 itération : tool_call -> async_call_tool -> message tool -> final."""
     fake_llm_api.tool_results["HassTurnOn"] = {"success": True}
-    chat = ChatMock(
+    chat = ChatStreamMock(
         [
-            make_chat_response(
-                tool_calls=[
-                    make_tool_call("call_1", "HassTurnOn", {"name": "Lampe Salon"})
-                ]
-            ),
-            make_chat_response(content="J'ai allumé la lampe du salon."),
+            [
+                make_delta(
+                    tool_calls=[
+                        make_tool_call_delta(
+                            "call_1", "HassTurnOn", {"name": "Lampe Salon"}
+                        )
+                    ]
+                )
+            ],
+            [make_delta(content="J'ai allumé la lampe du salon.")],
         ]
     )
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    result = await agent.async_process(make_conversation_input())
+    result = await process(hass, agent, make_conversation_input())
 
     assert len(fake_llm_api.tool_calls) == 1
     assert fake_llm_api.tool_calls[0].tool_name == "HassTurnOn"
     assert fake_llm_api.tool_calls[0].tool_args == {"name": "Lampe Salon"}
 
-    # Deuxième appel : la file contient system + user + assistant + tool.
+    # Deuxième tour : system + user + assistant(tool_calls) + tool.
     assert len(chat.calls) == EXPECTED_CHAT_CALLS_AFTER_TOOL
     second_messages = chat.calls[1]["messages"]
     assert [m["role"] for m in second_messages] == [
@@ -248,28 +300,182 @@ async def test_tool_call_loop(hass, entry, agent, fake_llm_api, monkeypatch) -> 
         "assistant",
         "tool",
     ]
-    assert second_messages[2]["tool_calls"] != []
+    replayed_assistant = second_messages[2]
+    assert replayed_assistant["tool_calls"]
     tool_message = second_messages[3]
-    assert tool_message["role"] == "tool"
     assert tool_message["tool_call_id"] == "call_1"
     assert json.loads(tool_message["content"]) == {"success": True}
 
     assert result.response.speech["plain"]["speech"] == "J'ai allumé la lampe du salon."
-    assert result.conversation_id == "conv-123"
+
+
+async def test_tool_arguments_assembled_across_deltas(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Les arguments d'un tool call arrivant en morceaux sont assemblés."""
+    chat = ChatStreamMock(
+        [
+            [
+                make_delta(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="",
+                            index=0,
+                            function=SimpleNamespace(
+                                name="HassTurnOn", arguments='{"na'
+                            ),
+                        )
+                    ]
+                ),
+                make_delta(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_x",
+                            index=0,
+                            function=SimpleNamespace(
+                                name="", arguments='me": "Lampe"}'
+                            ),
+                        )
+                    ]
+                ),
+            ],
+            [make_delta(content="ok")],
+        ]
+    )
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
+
+    result = await process(hass, agent, make_conversation_input())
+
+    assert len(fake_llm_api.tool_calls) == 1
+    assert fake_llm_api.tool_calls[0].tool_args == {"name": "Lampe"}
+    assert fake_llm_api.tool_calls[0].id == "call_x"
+    assert result.response.speech["plain"]["speech"] == "ok"
 
 
 async def test_tool_call_loop_hits_iteration_limit(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
     """Au-delà de MAX_TOOL_ITERATIONS, réponse de repli (pas de boucle infinie)."""
-    tool_call = make_tool_call("call_loop", "HassTurnOn", {"name": "Lampe"})
-    chat = ChatMock([make_chat_response(tool_calls=[tool_call])])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock(
+        [
+            [
+                make_delta(
+                    tool_calls=[
+                        make_tool_call_delta(
+                            "call_loop", "HassTurnOn", {"name": "Lampe"}
+                        )
+                    ]
+                )
+            ]
+        ]
+    )
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    result = await agent.async_process(make_conversation_input())
+    result = await process(hass, agent, make_conversation_input())
 
     assert len(chat.calls) == conv.MAX_TOOL_ITERATIONS
     assert result.response.speech["plain"]["speech"] == ERROR_LOOP_LIMIT_TEXT
+
+
+# ------------------------------------------------ mémoire multi-tours
+
+
+async def test_conversation_memory_across_turns(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Le deuxième tour reçoit l'historique du premier (ChatLog persistant)."""
+    chat = ChatStreamMock(
+        [
+            [make_delta(content="Le salon est à 20 degrés.")],
+            [make_delta(content="Et la cuisine ?")],
+        ]
+    )
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
+
+    # Même session (même conversation) sur deux énoncés successifs.
+    with chat_session.async_get_chat_session(hass, "conv-42") as session:
+        first_input = make_conversation_input(
+            text="Quelle température fait-il au salon ?", conversation_id="conv-42"
+        )
+        with ha_conversation.async_get_chat_log(hass, session, first_input) as chat_log:
+            await agent._async_handle_message(first_input, chat_log)
+
+        second_input = make_conversation_input(
+            text="Et à côté ?", conversation_id="conv-42"
+        )
+        with ha_conversation.async_get_chat_log(
+            hass, session, second_input
+        ) as chat_log:
+            await agent._async_handle_message(second_input, chat_log)
+
+    second_messages = chat.calls[1]["messages"]
+    roles = [message["role"] for message in second_messages]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert second_messages[1]["content"] == "Quelle température fait-il au salon ?"
+    assert second_messages[2]["content"] == "Le salon est à 20 degrés."
+    assert second_messages[3]["content"] == "Et à côté ?"
+
+
+def test_history_cap_cut_on_user_boundary() -> None:
+    """Le plafond d'historique coupe sur une frontière de tour utilisateur."""
+    messages = [{"role": "system", "content": "prompt"}]
+    for index in range(20):
+        messages.append({"role": "user", "content": f"q{index}"})
+        messages.append({"role": "assistant", "content": f"r{index}"})
+
+    capped = conv._cap_history(messages)
+    assert capped[0]["role"] == "system"
+    assert len(capped) <= MAX_HISTORY_MESSAGES
+    # La liste commence toujours par un tour utilisateur complet.
+    assert capped[1]["role"] == "user"
+    # Les tours ne sont jamais dissociés : pas de question orpheline.
+    roles = [message["role"] for message in capped]
+    assert roles.count("user") == roles.count("assistant")
+
+
+def test_history_kept_below_cap() -> None:
+    """Un historique court part intégralement (pre-prompt inclus)."""
+    messages = [
+        {"role": "system", "content": "p"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "r"},
+    ]
+    assert conv._cap_history(messages) == messages
+
+
+# --------------------------------------------------- streaming des deltas
+
+
+async def test_content_deltas_streamed_to_listener(
+    hass, entry, agent, fake_llm_api, monkeypatch
+) -> None:
+    """Les deltas de contenu alimentent le delta_listener (pipeline/TTS)."""
+    chat = ChatStreamMock(
+        [
+            [
+                make_delta(role="assistant"),
+                make_delta(content="Bon"),
+                make_delta(content="jour le "),
+                make_delta(content="monde."),
+            ]
+        ]
+    )
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
+
+    deltas: list[dict] = []
+    with chat_session.async_get_chat_session(hass, "conv-delta") as session:
+        user_input = make_conversation_input(conversation_id="conv-delta")
+        listener = lambda log, delta: deltas.append(delta)  # noqa: E731
+        with ha_conversation.async_get_chat_log(
+            hass, session, user_input, chat_log_delta_listener=listener
+        ) as chat_log:
+            result = await agent._async_handle_message(user_input, chat_log)
+
+    contents = [d.get("content") for d in deltas if d.get("content")]
+    assert contents == ["Bon", "jour le ", "monde."]
+    # Deux opening roles : un par tour de boucle (ici un seul tour).
+    assert sum(1 for d in deltas if d.get("role") == "assistant") >= 1
+    assert result.response.speech["plain"]["speech"] == "Bonjour le monde."
 
 
 # ------------------------------------------------ paramètres de l'appel chat
@@ -279,14 +485,13 @@ async def test_chat_call_parameters(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
     """max_tokens capé (~150), tool_choice auto, model = option (défaut)."""
-    chat = ChatMock([make_chat_response(content="Bonjour.")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock([[make_delta(content="Bonjour.")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    await agent.async_process(make_conversation_input())
+    await process(hass, agent, make_conversation_input())
 
     call = chat.calls[0]
     assert call["max_tokens"] == MAX_TOKENS
-    assert call["max_tokens"] == EXPECTED_MAX_TOKENS
     assert call["tool_choice"] == "auto"
     assert call["model"] == DEFAULT_MODEL
 
@@ -298,10 +503,10 @@ async def test_options_override_model(
     hass.config_entries.async_update_entry(
         entry, options={CONF_MODEL: "mon-model-custom"}
     )
-    chat = ChatMock([make_chat_response(content="ok")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock([[make_delta(content="ok")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    await agent.async_process(make_conversation_input())
+    await process(hass, agent, make_conversation_input())
 
     assert chat.calls[0]["model"] == "mon-model-custom"
 
@@ -312,22 +517,16 @@ async def test_options_override_model(
 async def test_default_system_prompt(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
-    """Le pre-prompt par défaut (texte exact de const.py) est actif."""
-    chat = ChatMock([make_chat_response(content="Hola")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    """Le pre-prompt par défaut (texte exact de const.py) est en tête du système."""
+    chat = ChatStreamMock([[make_delta(content="Hola")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    await agent.async_process(make_conversation_input())
+    await process(hass, agent, make_conversation_input())
 
-    assert chat.calls[0]["messages"][0] == {
-        "role": "system",
-        "content": DEFAULT_SYSTEM_PROMPT,
-    }
-    # Texte exact (objet str identique : clé du cache byte-stable).
-    first = chat.calls[0]["messages"][0]["content"]
-    second_call = ChatMock([])
-    monkeypatch.setattr(conv, "async_chat_complete", second_call)
-    await agent.async_process(make_conversation_input())
-    assert second_call.calls[0]["messages"][0]["content"] is first
+    system_message = chat.calls[0]["messages"][0]
+    assert system_message["role"] == "system"
+    # Le ChatLog compose : pre-prompt + prompt API LLM + date/heure.
+    assert system_message["content"].startswith(DEFAULT_SYSTEM_PROMPT)
 
 
 async def test_system_prompt_option_override(
@@ -341,74 +540,13 @@ async def test_system_prompt_option_override(
             CONF_MODEL: DEFAULT_MODEL,
         },
     )
-    chat = ChatMock([make_chat_response(content="Kenavo.")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock([[make_delta(content="Kenavo.")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    await agent.async_process(make_conversation_input())
+    await process(hass, agent, make_conversation_input())
 
-    assert chat.calls[0]["messages"][0]["content"] == "Toujours répondre en breton."
-
-
-# --------------------------------------------------- cache byte-stable
-
-
-async def test_tools_and_prompt_cached_byte_stable(
-    hass, entry, agent, fake_llm_api, monkeypatch
-) -> None:
-    """Mêmes objets renvoyés entre deux appels : requêtes byte-stables."""
-    chat_first = ChatMock([make_chat_response(content="un")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat_first)
-    input_ = make_conversation_input()
-    result_one = await agent.async_process(input_)
-    tools_first = chat_first.calls[0]["tools"]
-    prompt_first = chat_first.calls[0]["messages"][0]["content"]
-
-    fake_llm_api.tools = [
-        FakeTool(
-            name="HassTurnOn",
-            description="Allume les entités cibles",
-            parameters=probatio.Schema(
-                {"name": list[str], "area": probatio.Optional(str)}
-            ),
-        ),
-        FakeTool(name="HassGetState", description="Récupère un état"),
-    ]
-    chat_second = ChatMock([make_chat_response(content="deux")])
-    monkeypatch.setattr(conv, "async_chat_complete", chat_second)
-    result_two = await agent.async_process(input_)
-    tools_second = chat_second.calls[0]["tools"]
-    prompt_second = chat_second.calls[0]["messages"][0]["content"]
-
-    # Mêmes instances (identité) entre les deux appels.
-    for first, second in zip(tools_first, tools_second, strict=True):
-        assert first is second
-    assert tools_first == tools_second
-    assert prompt_second is prompt_first  # même objet str (lru_cache)
-    assert json.dumps(tools_first, sort_keys=True) == json.dumps(
-        tools_second, sort_keys=True
-    )
-    assert result_one.response.speech["plain"]["speech"] == "un"
-    assert result_two.response.speech["plain"]["speech"] == "deux"
-
-
-async def test_cache_refreshes_when_tool_changes(hass, entry, agent) -> None:
-    """Un outil dont le schéma change est reconverti (cache invalidé)."""
-    tool_a = FakeTool(
-        name="HassTurnOn",
-        description="desc",
-        parameters=probatio.Schema({"name": str}),
-    )
-    first = agent.convert_tool(tool_a)
-    tool_b = FakeTool(
-        name="HassTurnOn",
-        description="desc",
-        parameters=probatio.Schema({"name": str, "area": str}),
-    )
-    second = agent.convert_tool(tool_b)
-    assert first is not second
-    assert "area" in second["function"]["parameters"]["properties"]
-    # Outil inchangé -> même objet.
-    assert agent.convert_tool(tool_b) is second
+    system_message = chat.calls[0]["messages"][0]
+    assert system_message["content"].startswith("Toujours répondre en breton.")
 
 
 # --------------------------------------------------- erreurs API polies
@@ -422,9 +560,9 @@ async def test_api_error_returns_polite_french_response(
     async def failing_chat(hass, entry, **kwargs):
         raise MistralApiError("POST /v1/chat/completions a échoué : …")
 
-    monkeypatch.setattr(conv, "async_chat_complete", failing_chat)
+    monkeypatch.setattr(conv, "async_chat_complete_stream", failing_chat)
 
-    result = await agent.async_process(make_conversation_input(KEY_PLACEHOLDER))
+    result = await process(hass, agent, make_conversation_input())
 
     speech = result.response.speech["plain"]["speech"]
     assert speech == ERROR_RESPONSE_TEXT
@@ -443,107 +581,44 @@ async def test_llm_api_unavailable_returns_polite_french_response(
 
     monkeypatch.setattr(llm, "async_get_api", failing_get_api)
 
-    result = await agent.async_process(make_conversation_input())
+    result = await process(hass, agent, make_conversation_input())
 
     assert result.response.speech["plain"]["speech"] == ERROR_RESPONSE_TEXT
     assert result.response.response_type is intent.IntentResponseType.ERROR
 
 
-async def test_tool_execution_failure_gives_error_content_to_model(
+async def test_empty_response_returns_polite_error(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
-    """Un outil en échec produit un message tool d'erreur, pas d'exception."""
+    """Réponse sans texte parlable (max_tokens, raisonnement) -> réponse polie."""
+    chat = ChatStreamMock([[make_delta(content="")]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    async def broken_call_tool(tool_input):
-        raise RuntimeError("entité introuvable")
+    result = await process(hass, agent, make_conversation_input())
 
-    fake_llm_api.async_call_tool = broken_call_tool  # type: ignore[method-assign]
-    chat = ChatMock(
-        [
-            make_chat_response(
-                tool_calls=[make_tool_call("call_9", "HassTurnOn", {"name": "X"})]
-            ),
-            make_chat_response(content="Je n'ai pas réussi à faire l'action."),
-        ]
-    )
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
-
-    result = await agent.async_process(make_conversation_input())
-
-    tool_message = chat.calls[1]["messages"][3]
-    assert tool_message["role"] == "tool"
-    assert json.loads(tool_message["content"]) == {"error": "tool_execution_failed"}
-    assert result.response.speech["plain"]["speech"] == (
-        "Je n'ai pas réussi à faire l'action."
-    )
+    assert result.response.speech["plain"]["speech"] == ERROR_RESPONSE_TEXT
+    assert result.response.response_type is intent.IntentResponseType.ERROR
 
 
-async def test_reasoning_model_content_parts_spoken(
+async def test_content_parts_only_text_spoken(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
-    """Modèles raisonnement hébergés : `content` en liste de parties typées.
+    """Modèles raisonnement hébergés : deltas `content` en liste de parties.
 
     Seules les parties `text` sont conservées (concaténées dans l'ordre) ;
     les parties raisonnement ne sont jamais parlées.
     """
-    content = [
-        {"type": "reasoning", "text": "L'utilisateur demande l'heure…"},
-        {"type": "text", "text": "Il est "},
-        {"type": "text", "text": "23 h 17."},
+    parts = [
+        SimpleNamespace(type="reasoning", text="L'utilisateur demande l'heure…"),
+        SimpleNamespace(type="text", text="Il est "),
+        SimpleNamespace(type="text", text="23 h 17."),
     ]
-    chat = ChatMock([make_chat_response(content=content)])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
+    chat = ChatStreamMock([[make_delta(content=parts)]])
+    monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 
-    result = await agent.async_process(make_conversation_input())
+    result = await process(hass, agent, make_conversation_input())
 
     assert result.response.speech["plain"]["speech"] == "Il est 23 h 17."
-    assert result.response.response_type is intent.IntentResponseType.ACTION_DONE
-
-
-async def test_reasoning_model_content_parts_replayed_as_text(
-    hass, entry, agent, fake_llm_api, monkeypatch
-) -> None:
-    """Dans la boucle tool calling, l'assistant est rejoué en texte normalisé.
-
-    La liste de parties ne peut pas repartir telle quelle vers Mistral :
-    le message assistant rejoué porte le texte concaténé des parties text.
-    """
-    content = [
-        {"type": "text", "text": "Je regarde la lampe."},
-        {"type": "reasoning", "text": "…"},
-    ]
-    chat = ChatMock(
-        [
-            make_chat_response(
-                content=content,
-                tool_calls=[make_tool_call("call_p", "HassTurnOn", {"name": "Lampe"})],
-            ),
-            make_chat_response(content="C'est allumé."),
-        ]
-    )
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
-
-    result = await agent.async_process(make_conversation_input())
-
-    replayed = chat.calls[1]["messages"][2]
-    assert replayed["role"] == "assistant"
-    assert replayed["content"] == "Je regarde la lampe."
-    assert result.response.speech["plain"]["speech"] == "C'est allumé."
-
-
-async def test_content_without_text_parts_returns_polite_error(
-    hass, entry, agent, fake_llm_api, monkeypatch
-) -> None:
-    """Une liste de parties sans aucun `text` reste une réponse vide → polie."""
-    content = [{"type": "reasoning", "text": "je réfléchis…"}]
-    chat = ChatMock([make_chat_response(content=content)])
-    monkeypatch.setattr(conv, "async_chat_complete", chat)
-
-    result = await agent.async_process(make_conversation_input())
-
-    # Texte de repli poli ; le pipeline voit un ACTION_DONE (seule la
-    # branche d'exception de async_process type la réponse en ERROR).
-    assert result.response.speech["plain"]["speech"] == ERROR_RESPONSE_TEXT
     assert result.response.response_type is intent.IntentResponseType.ACTION_DONE
 
 
@@ -551,8 +626,8 @@ async def test_content_without_text_parts_returns_polite_error(
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")
-async def test_agent_registered_on_setup_and_unset_on_unload(hass) -> None:
-    """L'agent est enregistré programmatiquement au setup, retiré au unload."""
+async def test_agent_entity_registered_on_setup_and_unset_on_unload(hass) -> None:
+    """L'entité conversation s'enregistre au setup, se retire au unload."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Mistral Voice",
@@ -564,10 +639,25 @@ async def test_agent_registered_on_setup_and_unset_on_unload(hass) -> None:
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED
 
+    # L'agent s'est enregistré auprès du Pipeline Assist sous l'id d'entrée
+    # (compatibilité avec les pipelines existants).
     agent = ha_conversation.async_get_agent(hass, entry.entry_id)
-    assert agent is not None
-    assert isinstance(agent, MistralVoiceAgent)
+    assert isinstance(agent, MistralVoiceAgentEntity)
     assert agent.supported_languages == "*"
+
+    # L'entité est dans le registre du domaine conversation.
+    registry = er.async_get(hass)
+    conv_entities = [
+        reg_entry
+        for reg_entry in registry.entities.values()
+        if reg_entry.platform == DOMAIN and reg_entry.domain == "conversation"
+    ]
+    assert len(conv_entities) == 1
+
+    # L'agent expose le streaming.
+    entry_info = ha_conversation.async_get_agent_info(hass, agent.entity_id)
+    assert entry_info is not None
+    assert entry_info.supports_streaming is True
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

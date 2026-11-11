@@ -6,9 +6,19 @@ uniquement vers api.mistral.ai — ADR 0001) :
 - `client.models.list()` → GET /v1/models (alimente le sélecteur
   dynamique de modèles, jamais de liste statique en dur) ;
 - `client.chat.complete(...)` → POST /v1/chat/completions
-  (l'agent de conversation, tickets suivis) ;
+  (l'agent de conversation, tickets suivants) ;
+- `client.chat.stream_async(...)` → POST /v1/chat/completions en flux
+  SSE (l'agent de conversation en flux diffuse les deltas au pipeline) ;
 - `client.audio.speech.complete(...)` → POST /v1/audio/speech
-  (la synthèse vocale, réponse en audio base64 `audio_data`).
+  (la synthèse vocale sans flux, réponse en audio base64 `audio_data`) ;
+- `client.audio.speech.complete_async(..., stream=True)` → POST
+  /v1/audio/speech en flux SSE (synthèse vocale en flux : événements
+  `speech.audio.delta`).
+
+Les méthodes `*_async` du SDK itèrent nativement en asyncio
+(`EventStreamAsync`) : les chemins synchrones restent hors de la boucle
+event (`async_add_executor_job`), les chemins en flux consomment un
+itérateur asynchrone.
 
 La clé API ne vit que dans `entry.data[CONF_API_KEY]` : elle est passée
 au constructeur du SDK et n'est jamais loguée, relue, ni incluse dans un
@@ -197,6 +207,71 @@ async def async_speech_complete(
         return await hass.async_add_executor_job(
             partial(client.audio.speech.complete, **call_kwargs)
         )
+    except Exception as err:
+        raise MistralApiError(
+            "POST /v1/audio/speech a échoué : API injoignable ou réponse invalide."
+        ) from err
+
+
+async def async_chat_complete_stream(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    model: str,
+    messages: Iterable[Mapping[str, Any]],
+    tools: Iterable[Any] | None = None,
+    tool_choice: str | None = None,
+    max_tokens: int | None = None,
+) -> Any:
+    """POST /v1/chat/completions en flux SSE via `client.chat.stream_async`.
+
+    Renvoie un `EventStreamAsync` d'événements `CompletionEvent`
+    (itérable en asyncio) ; les erreurs d'ouverture sont enrobées en
+    `MistralApiError`, celles de lecture le sont par l'appelant.
+    """
+    client = get_data(hass, entry).get_client()
+    call_kwargs: dict[str, Any] = {"model": model, "messages": messages}
+    if tools:
+        call_kwargs["tools"] = tools
+    if tool_choice:
+        call_kwargs["tool_choice"] = tool_choice
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+    try:
+        return await client.chat.stream_async(**call_kwargs)
+    except Exception as err:
+        raise MistralApiError(
+            "POST /v1/chat/completions a échoué : API injoignable ou réponse invalide."
+        ) from err
+
+
+async def async_speech_stream(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    model: str,
+    text: str,
+    response_format: str,
+    voice_id: str | None = None,
+) -> Any:
+    """POST /v1/audio/speech en flux via `client.audio.speech.complete_async`.
+
+    Renvoie un `EventStreamAsync` d'événements `SpeechStreamEvents`
+    (delta `speech.audio.delta` puis `speech.audio.done`). `voice_id`
+    n'est transmis que s'il est renseigné : vide, l'API utilise sa voix
+    par défaut.
+    """
+    client = get_data(hass, entry).get_client()
+    call_kwargs: dict[str, Any] = {
+        "model": model,
+        "input": text,
+        "response_format": response_format,
+        "stream": True,
+    }
+    if voice_id:
+        call_kwargs["voice_id"] = voice_id
+    try:
+        return await client.audio.speech.complete_async(**call_kwargs)
     except Exception as err:
         raise MistralApiError(
             "POST /v1/audio/speech a échoué : API injoignable ou réponse invalide."

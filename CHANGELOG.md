@@ -4,6 +4,48 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.2.0] — Mémoire de conversation et streaming (agent & TTS)
+
+### Ajouté
+
+- **Mémoire de conversation multi-tours** : l'agent devient une entité
+  `conversation.ConversationEntity` (pattern Home Assistant 2026.10 déjà
+  utilisé par openai_conversation). Chaque énoncé est traité avec le
+  `ChatLog` persistant de la conversation — les tours précédents
+  (questions, réponses, appels d'outils et résultats) sont renvoyés au
+  modèle, plafonnés à 40 messages coupés sur une frontière de tour
+  utilisateur. « Et à côté ? », « allume-la aussi » fonctionnent.
+- **Agent en flux** : la réponse du modèle arrive en SSE
+  (`chat.stream_async`, POST /v1/chat/completions en flux) et les deltas
+  de contenu sont poussés dans le `ChatLog` — le pipeline Assist peut
+  les diffuser au TTS au fil de l'eau (`.supports_streaming`). Les
+  arguments des tool calls sont assemblés avant exécution côté HA.
+- **TTS en flux** : la plateforme `tts` implémente
+  `async_stream_tts_audio` (POST /v1/audio/speech SSE,
+  `speech.audio.delta`) — le satellite vocal commence à jouer avant la
+  fin de la génération. L'option Home Assistant `preferred_format` est
+  déclarée supportée : l'API produit directement le format du
+  consommateur (WAV 16 kHz/16 bits/mono pour le Voice PE, MP3 par
+  défaut) sans conversion ffmpeg hasardeuse sur du PCM brut.
+- Compatibilité pipelines : l'agent reste enregistré sous l'id
+  d'entrée en plus de son entité — les pipelines existants continuent
+  de fonctionner ; la sélection « Mistral Voice » est inchangée.
+- La suite de tests passe de 81 à 92 : l'agent conversation est
+  retraversé sous la forme entité (mémoire sur deux tours, deltas
+  diffusés au listener du pipeline, arguments de tool call assemblés,
+  plafond d'historique sur frontière utilisateur, erreurs API/LLM
+  polies, vide → poli), la plateforme TTS gagne le chemin en flux
+  (6 tests) et le client API les deux fonctions streaming (3 tests).
+
+### Modifié
+
+- L'agent expose maintenant le contrôle (`ConversationEntityFeature.
+  CONTROL`) : les pipelines préfèrent les agents qui contrôlent la
+  maison.
+- Le pre-prompt est placé avec le prompt de l'API LLM Assist et la
+  date/heure (composition standard du `ChatLog`) — le pre-prompt
+  utilisateur reste en tête de message système.
+
 ## [1.1.0] — Synthèse vocale (TTS)
 
 ### Ajouté

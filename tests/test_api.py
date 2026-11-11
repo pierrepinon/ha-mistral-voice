@@ -7,7 +7,7 @@ ni message d'exception.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import pytest
@@ -292,6 +292,137 @@ async def test_async_speech_complete_wraps_sdk_errors(hass) -> None:
             model="voxtral-mini-tts-3-0",
             text="Bonjour",
             response_format="mp3",
+        )
+
+
+async def test_chat_stream_uses_sdk_async_stream(hass) -> None:
+    """`async_chat_complete_stream` appelle `chat.stream_async` (flux async)."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    stream = SimpleNamespace(chunks=[], closed=False)
+    stream_async = AsyncMock(return_value=stream)
+    fake_client = SimpleNamespace(chat=SimpleNamespace(stream_async=stream_async))
+    messages = [{"role": "user", "content": "Salut"}]
+    tools = [{"type": "function", "function": {}}]
+
+    with patch.object(api, "Mistral", return_value=fake_client):
+        result = await api.async_chat_complete_stream(
+            hass,
+            entry,
+            model="mistral-small-latest",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=150,
+        )
+
+    assert result is stream
+    stream_async.assert_called_once_with(
+        model="mistral-small-latest",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        max_tokens=150,
+    )
+
+
+async def test_chat_stream_wraps_sdk_errors(hass) -> None:
+    """Erreur d'ouverture du flux chat -> `MistralApiError` générique."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(stream_async=AsyncMock(side_effect=RuntimeError("panic")))
+    )
+    with (
+        patch.object(api, "Mistral", return_value=fake_client),
+        pytest.raises(api.MistralApiError),
+    ):
+        await api.async_chat_complete_stream(
+            hass,
+            entry,
+            model="mistral-small-latest",
+            messages=[{"role": "user", "content": "Salut"}],
+        )
+
+
+async def test_speech_stream_uses_sdk_async_stream(hass) -> None:
+    """`async_speech_stream` appelle `complete_async` avec stream=True."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    stream = SimpleNamespace(closed=False)
+    complete_async = AsyncMock(return_value=stream)
+    fake_client = SimpleNamespace(
+        audio=SimpleNamespace(speech=SimpleNamespace(complete_async=complete_async))
+    )
+
+    with patch.object(api, "Mistral", return_value=fake_client):
+        result = await api.async_speech_stream(
+            hass,
+            entry,
+            model="voxtral-mini-tts-3-0",
+            text="Bonjour",
+            response_format="wav",
+        )
+        assert result is stream
+        complete_async.assert_called_once_with(
+            model="voxtral-mini-tts-3-0",
+            input="Bonjour",
+            response_format="wav",
+            stream=True,
+        )
+
+        # voice_id conditionnel : vide il n'est pas transmis (défaut API),
+        # renseigné il part à l'appel.
+        await api.async_speech_stream(
+            hass,
+            entry,
+            model="voxtral-mini-tts-3-0",
+            text="Bonjour",
+            response_format="wav",
+            voice_id="",
+        )
+        assert "voice_id" not in complete_async.call_args.kwargs
+
+        await api.async_speech_stream(
+            hass,
+            entry,
+            model="voxtral-mini-tts-3-0",
+            text="Bonjour",
+            response_format="wav",
+            voice_id="voice-42",
+        )
+        assert complete_async.call_args.kwargs["voice_id"] == "voice-42"
+
+
+async def test_speech_stream_wraps_sdk_errors(hass) -> None:
+    """Erreur d'ouverture du flux TTS -> `MistralApiError` générique."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    failing = SimpleNamespace(
+        audio=SimpleNamespace(
+            speech=SimpleNamespace(
+                complete_async=AsyncMock(side_effect=RuntimeError("panic"))
+            )
+        )
+    )
+    with (
+        patch.object(api, "Mistral", return_value=failing),
+        pytest.raises(api.MistralApiError),
+    ):
+        await api.async_speech_stream(
+            hass,
+            entry,
+            model="voxtral-mini-tts-3-0",
+            text="Bonjour",
+            response_format="wav",
         )
 
 

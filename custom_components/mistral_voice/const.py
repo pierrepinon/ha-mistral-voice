@@ -31,10 +31,15 @@ DEFAULT_VOICE = ""
 
 # Synthèse vocale : appel POST /v1/audio/speech. Le modèle de TTS est fixe :
 # Voxtral TTS 3 (remplace le v2 `voxtral-mini-tts-2603`, déprécié par Mistral),
-# qui garde les mêmes paramètres d'appel ; la réponse est demandée en MP3
-# (extension renvoyée au Pipeline Assist, l'audio part décodé en bytes).
+# qui garde les mêmes paramètres d'appel. L'option `voice` (vide = voix par
+# défaut de l'API) est commune aux deux chemins audio :
+# - sans flux (service tts.speak, cache) : réponse audio complète en base64 ;
+# - en flux (async_stream_tts_audio, pipeline Assist / satellite) :
+#   événements `speech.audio.delta` au fil de l'eau. L'entité `tts` annonce
+#   le format au pipeline (option Home Assistant `preferred_format` :
+#   wav, mp3, flac ou opus ; toute autre valeur demandée retombe sur mp3)
+#   et l'API produit directement ce format.
 TTS_MODEL = "voxtral-mini-tts-3-0"
-TTS_AUDIO_FORMAT = "mp3"
 
 # Langues de transcription pour le champ `language` des options.
 SUPPORTED_LANGUAGES = {"fr", "en", "de", "es", "it"}
@@ -54,13 +59,18 @@ DEFAULT_SYSTEM_PROMPT = (
     "mentionner que tu es un modèle ou que tu utilises des outils."
 )
 
-# Conversation : appel POST /v1/chat/completions.
+# Conversation : appels POST /v1/chat/completions en flux (SSE, SDK async).
 MAX_TOKENS = 150
 TOOL_CHOICE_AUTO = "auto"
 
 # Boucle de tool calling : nombre max d'allers-retours avec le modèle,
 # pour éviter les boucles infinies (tool_call -> tool -> tool_call…).
 MAX_TOOL_ITERATIONS = 5
+
+# Mémoire de conversation : nombre max de messages (hors pre-prompt)
+# renvoyés au modèle ; la coupure se fait sur une frontière de tour
+# utilisateur pour ne jamais séparer un appel d'outil de sa réponse.
+MAX_HISTORY_MESSAGES = 40
 
 # Réponses d'erreur polies (jamais de message d'exception : ni la clé API
 # ni les détails de requête ne sont exposés à l'utilisateur).

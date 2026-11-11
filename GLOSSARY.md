@@ -21,11 +21,15 @@ Session WebSocket temps réel vers l'API Mistral (`input_audio` → `input_audio
 _Avoid_: streaming générique, partials
 
 **Agent de conversation** :
-Composant Home Assistant qui reçoit le texte transcrit et produit la réponse vocale. Ici : appels `chat/completions` Mistral avec outils.
-_Avoid_: chatbot, assistant IA générique
+Entité de conversation Home Assistant qui reçoit le texte transcrit, produit la réponse avec les outils et **tient la mémoire de la conversation** (historique multi-tours du ChatLog). Ici : appels en flux `chat/completions` Mistral, deltas diffusés au Pipeline Assist au fil de l'eau.
+_Avoid_: chatbot, assistant IA générique, agent programmatique
+
+**ChatLog** :
+Historique de conversation persistant de Home Assistant (par identifiant de conversation) : questions, réponses, tool calls et résultats. L'agent y pousse ses deltas (`async_add_delta_content_stream`), le pipeline y branche le TTS.
+_Avoid_: session, contexte de dialogue
 
 **Fournisseur TTS** :
-Entité Home Assistant qui synthétise en audio la réponse de l'agent de conversation. Ici : appel unique `POST /v1/audio/speech` au modèle de synthèse vocale, réponse audio base64 décodée en MP3 et jouée par le satellite vocal.
+Entité Home Assistant qui synthétise en audio la réponse de l'agent de conversation, sans flux (service `tts.speak`, audio complet) ou en flux (`async_stream_tts_audio`, événements `speech.audio.delta` joués par le satellite au fil de l'eau). Ici : appels POST /v1/audio/speech au modèle de synthèse vocale, format choisi par l'option `preferred_format` du pipeline.
 _Avoid_: lecteur audio, service TTS, voix (pour l'entité)
 
 **Outil** :

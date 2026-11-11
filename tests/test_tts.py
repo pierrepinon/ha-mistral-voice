@@ -1,16 +1,21 @@
 """Tests du fournisseur TTS Mistral Voice.
 
 Cas couverts :
-- flux nominal : texte -> `POST /v1/audio/speech` -> audio base64 décodé en
-  bytes MP3, rendu au pipeline avec l'extension `mp3` ;
+- flux nominal sans stream : texte -> `POST /v1/audio/speech` -> audio
+  base64 décodé en bytes, rendu au pipeline avec son extension ;
 - option ``voice`` (identifiant de voix Mistral) transmise à l'appel,
   et absente de l'appel quand elle est vide (voix par défaut de l'API) ;
 - erreur API -> `HomeAssistantError` générique (jamais de détail de
   requête ni de clé API dans le message ou les logs) ;
 - réponse sans `audio_data` ou base64 invalide -> `HomeAssistantError` ;
-- langues supportées / langue par défaut qui suivent l'option ``language``
-  (récupérées à la création de l'entité, l'entrée est rechargée à la
-  modification des options) ;
+- **chemin en flux** (`async_stream_tts_audio`, pipeline Assist /
+  satellite vocal) : `message_gen` consommé, flux `speech.audio.delta`
+  décodé chunk par chunk, format tiré de l'option Home Assistant
+  `preferred_format` (wav pour le satellite, mp3 par défaut, repli mp3
+  pour toute valeur inconnue), erreurs d'ouverture et de lecture en
+  `HomeAssistantError` générique ;
+- option `preferred_format` déclarée supportée ;
+- langues supportées / langue par défaut qui suivent l'option `language` ;
 - intégration légère : la plateforme ``tts`` est chargée au setup de
   l'entrée (enable_custom_integrations), même appareil que le STT.
 
@@ -24,6 +29,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+from homeassistant.components.tts import ATTR_PREFERRED_FORMAT, TTSAudioRequest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -49,6 +55,32 @@ AUDIO_DATA_B64 = base64.b64encode(AUDIO_BYTES).decode()
 def _response() -> Any:
     """Réponse factice de POST /v1/audio/speech (audio base64)."""
     return SimpleNamespace(audio_data=AUDIO_DATA_B64)
+
+
+def _audio_event(audio_bytes: bytes) -> Any:
+    """Événement factice `speech.audio.delta` du flux SSE."""
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            audio_data=base64.b64encode(audio_bytes).decode(),
+            type="speech.audio.delta",
+        )
+    )
+
+
+def _stream(events: list[Any]) -> Any:
+    """Flux SSE asynchrone factice (itérable async d'événements)."""
+
+    async def gen():
+        for event in events:
+            yield event
+
+    return gen()
+
+
+async def _message_gen(chunks: list[str]) -> Any:
+    """`message_gen` du pipeline : diffs la réponse de l'agent."""
+    for chunk in chunks:
+        yield chunk
 
 
 async def _make_entity(
@@ -151,6 +183,133 @@ async def test_languages_follow_options(hass) -> None:
     _, entity_en = await _make_entity(hass, options={CONF_LANGUAGE: "en"})
     assert entity_en.supported_languages == ["en"]
     assert entity_en.default_language == "en"
+
+
+# ------------------------------------------------- chemin en flux
+
+
+def test_preferred_format_option_declared(hass) -> None:
+    """L'option `preferred_format` de HA est déclarée supportée (mp3 défaut)."""
+    entity = MistralVoiceTTSEntityStub()
+    assert entity.supported_options == [ATTR_PREFERRED_FORMAT]
+    assert entity.default_options == {ATTR_PREFERRED_FORMAT: "mp3"}
+
+
+class MistralVoiceTTSEntityStub(tts_module.MistralVoiceTTSEntity):
+    """Entité instanciable sans entrée (lecture des attributs de classe)."""
+
+    def __init__(self) -> None:
+        """Aucune initialisation : on lit les attributs de classe."""
+
+
+async def test_stream_nominal(hass) -> None:
+    """message_gen -> flux audio -> chunks décodés, extension wav du satellite."""
+    chunks = [b"\x01wav-hdr", b"\x02frames"]
+    with patch.object(
+        tts_module,
+        "async_speech_stream",
+        AsyncMock(return_value=_stream([_audio_event(c) for c in chunks])),
+    ) as stream_mock:
+        _, entity = await _make_entity(hass)
+
+        response = await entity.async_stream_tts_audio(
+            TTSAudioRequest(
+                language="fr",
+                options={ATTR_PREFERRED_FORMAT: "wav"},
+                message_gen=_message_gen(["Salut le ", "monde."]),
+            )
+        )
+
+    assert response.extension == "wav"
+    received = [chunk async for chunk in response.data_gen]
+    assert received == chunks
+
+    call_kwargs = stream_mock.call_args.kwargs
+    assert call_kwargs["text"] == "Salut le monde."
+    assert call_kwargs["response_format"] == "wav"
+    assert call_kwargs["model"] == tts_module.TTS_MODEL
+    assert call_kwargs["voice_id"] is None
+
+
+async def test_stream_default_and_unknown_format_fall_back_to_mp3(hass) -> None:
+    """Sans option ou avec `raw` (hors scope) : MP3, jamais de PCM brut."""
+    with patch.object(
+        tts_module,
+        "async_speech_stream",
+        AsyncMock(return_value=_stream([_audio_event(b"\x01mp3")])),
+    ) as stream_mock:
+        _, entity = await _make_entity(hass)
+
+        response = await entity.async_stream_tts_audio(
+            TTSAudioRequest(language="fr", options={}, message_gen=_message_gen(["a"]))
+        )
+        assert response.extension == "mp3"
+        assert stream_mock.call_args.kwargs["response_format"] == "mp3"
+
+        response = await entity.async_stream_tts_audio(
+            TTSAudioRequest(
+                language="fr",
+                options={ATTR_PREFERRED_FORMAT: "raw"},
+                message_gen=_message_gen(["a"]),
+            )
+        )
+        assert response.extension == "mp3"
+        assert stream_mock.call_args.kwargs["response_format"] == "mp3"
+
+
+async def test_stream_voice_option_transmitted(hass) -> None:
+    """L'option voice part dans l'appel en flux comme dans l'appel complet."""
+    with patch.object(
+        tts_module,
+        "async_speech_stream",
+        AsyncMock(return_value=_stream([_audio_event(b"\x01mp3")])),
+    ) as stream_mock:
+        _, entity = await _make_entity(hass, options={CONF_VOICE: "voice-42"})
+
+        await entity.async_stream_tts_audio(
+            TTSAudioRequest(language="fr", options={}, message_gen=_message_gen(["a"]))
+        )
+
+    assert stream_mock.call_args.kwargs["voice_id"] == "voice-42"
+
+
+async def test_stream_api_error_raises_home_assistant_error(hass) -> None:
+    """Erreur à l'ouverture du flux -> HomeAssistantError générique."""
+    with patch.object(
+        tts_module,
+        "async_speech_stream",
+        AsyncMock(side_effect=MistralApiError("POST /v1/audio/speech a échoué")),
+    ):
+        _, entity = await _make_entity(hass)
+
+        with pytest.raises(HomeAssistantError):
+            await entity.async_stream_tts_audio(
+                TTSAudioRequest(
+                    language="fr", options={}, message_gen=_message_gen(["a"])
+                )
+            )
+
+
+async def test_stream_mid_stream_error_raises_home_assistant_error(hass) -> None:
+    """Erreur pendant la lecture du flux -> HomeAssistantError générique."""
+
+    async def failing_stream():
+        yield _audio_event(b"\x01mp3")
+        raise RuntimeError("websocket gone")
+
+    with patch.object(
+        tts_module, "async_speech_stream", AsyncMock(return_value=failing_stream())
+    ):
+        _, entity = await _make_entity(hass)
+
+        response = await entity.async_stream_tts_audio(
+            TTSAudioRequest(language="fr", options={}, message_gen=_message_gen(["a"]))
+        )
+        first = await response.data_gen.__anext__()
+        assert first == b"\x01mp3"
+        with pytest.raises(HomeAssistantError):
+            async for _ in response.data_gen:
+                pass
 
 
 @pytest.mark.usefixtures("enable_custom_integrations")

@@ -53,6 +53,11 @@
       "mistral_tts": {
         "name": "Synthèse vocale (Mistral)"
       }
+    },
+    "conversation": {
+      "mistral_agent": {
+        "name": "Mistral Voice"
+      }
     }
   }
 }

@@ -1,14 +1,15 @@
 # Mistral Voice
 
 ![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge&logo=homeassistantcommunitystore)
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg?style=for-the-badge)
 ![Licence](https://img.shields.io/badge/licence-Apache%202.0-blue.svg?style=for-the-badge)
 
 [![Ouvrir dans HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pierrepinon&repository=ha-mistral-voice&category=integration)
 
 Intégration Home Assistant custom pour un **assistant vocal 100 % cloud via
 l'API Mistral** : transcription en flux (STT), agent de conversation avec
-outils et synthèse vocale (TTS), pensés pour les satellites
+outils **et mémoire des tours précédents**, synthèse vocale en flux (TTS),
+pensés pour les satellites
 [Home Assistant Voice PE](https://www.home-assistant.io/voice-pe/) et toute
 installation HAOS ~2026.10.x.
 
@@ -42,10 +43,10 @@ Toutes les flèches partent de Home Assistant : **HTTPS/WSS sortant
 uniquement**, aucun port ouvert, aucune règle de pare-feu entrante.
 La transcription en flux passe par un WebSocket initialisé par session
 (config → `input_audio.append` → `input_audio.end` → deltas →
-`transcription.done`), l'agent de conversation par
-`POST /v1/chat/completions` avec les outils Assist de HA convertis en
-function-calling Mistral, la synthèse vocale par un appel unique
-`POST /v1/audio/speech` qui renvoie l'audio encodé en base64.
+`transcription.done`), l'agent de conversation et le TTS répondent **en
+flux SSE** (POST /v1/chat/completions puis /v1/audio/speech) : les deltas
+de l'agent et les chunks audio du TTS arrivent au fil de l'eau, le
+satellite joue la réponse avant qu'elle soit entièrement générée.
 
 ## Installation via HACS (one-click)
 
@@ -151,42 +152,59 @@ secret n'apparaît dans les logs.
 
 ### Agent de conversation et outils HA
 
-Quand un énoncé est transcrit, l'agent **Mistral Voice** est interrogé par
-le pipeline Assist :
+Quand un énoncé est transcrit, l'agent **Mistral Voice** (entité
+conversation Home Assistant) est interrogé par le pipeline Assist :
 
-1. Les outils LLM de HA (API Assist : `HassTurnOn`, etc., issus des entités
+1. Le pipeline ouvre le `ChatLog` de la conversation : l'agent y retrouve
+   **l'historique des tours précédents** (questions, réponses, appels
+   d'outils et résultats) — les demandes de suivi (« et à côté ? »,
+   « allume-la aussi ») fonctionnent. L'historique envoyé au modèle est
+   plafonné (40 messages, coupure sur une frontière de tour utilisateur).
+2. Les outils LLM de HA (API Assist : `HassTurnOn`, etc., issus des entités
    exposées à Assist) sont convertis au schéma **function-calling** Mistral
    (`{"type": "function", "function": {…}}`) — le mécanisme d'outils de HA
    n'est pas réimplémenté.
-2. Un appel `POST /v1/chat/completions` est fait avec le pre-prompt et les
-   outils, `tool_choice="auto"`, `max_tokens` capé à 150.
-3. Si le modèle demande un outil, l'outil est exécuté **côté HA** via l'API
+3. Un appel `POST /v1/chat/completions` **en flux SSE** est fait avec le
+   pre-prompt et les outils, `tool_choice="auto"`, `max_tokens` capé à 150 ;
+   les deltas de contenu sont poussés dans le `ChatLog` et peuvent être
+   diffusés au TTS au fur et à mesure (l'agent déclare
+   `supports_streaming`).
+4. Si le modèle demande un outil, il est exécuté **côté HA** via l'API
    LLM, le résultat repart en message `tool`, et la conversation reboucle
    (5 itérations max) jusqu'au texte final.
-4. Le texte final (français, style parlé) est renvoyé au pipeline, puis
+5. Le texte final (français, style parlé) est renvoyé au pipeline, puis
    synthétisé par le TTS du pipeline.
-5. En cas d'erreur (API injoignable, outil en échec), une réponse polie en
+6. En cas d'erreur (API injoignable, outil en échec), une réponse polie en
    français est renvoyée : pas d'exception exposée, jamais de secret.
+
+> Compatibilité : l'agent reste enregistré sous l'id de l'entrée en plus
+> de son entité — les pipelines configurés sur « Mistral Voice »
+> fonctionnent sans changement après la mise à jour.
 
 ### Synthèse vocale (TTS)
 
 L'intégration fournit un fournisseur TTS, entité **« Synthèse vocale
-(Mistral) »**, implémentant `TextToSpeechEntity`. À chaque réponse de
-l'agent de conversation :
+(Mistral) »**, implémentant `TextToSpeechEntity` :
 
-1. Le pipeline transmet le texte à parler ; l'entité appelle
-   `POST /v1/audio/speech` (`voxtral-mini-tts-3-0`) en un seul appel
-   HTTPS sortant, avec la voix de l'option si renseignée.
-2. L'API renvoie l'audio encodé en base64 (`audio_data`) ; l'entité le
-   décode et le rend au pipeline au format MP3, joué par le satellite.
-3. En cas d'échec (API injoignable, contenu refusé par la modération),
-   l'erreur remonte au pipeline en `HomeAssistantError` générique —
-   jamais de clé ni de texte parlé dans les logs.
+1. **Sans flux** (service `tts.speak`) : un appel
+   `POST /v1/audio/speech` (`voxtral-mini-tts-3-0`) renvoie l'audio
+   complet en base64, décodé et rendu avec son extension.
+2. **En flux** (pipeline Assist / satellite vocal) : l'appel part avec
+   `stream=True` et l'audio arrive en événements `speech.audio.delta`,
+   décodés et diffusés au pipeline chunk par chunk — le satellite vocal
+   commence à jouer avant la fin de la génération (latence au premier
+   audio réduite, silence de fin raccourci).
+3. Le format est celui du consommateur : l'option Home Assistant
+   `preferred_format` est supportée, le satellite Voice PE reçoit du WAV
+   16 kHz/16 bits/mono natif (MP3/FLAC/Opus sinon, MP3 par défaut),
+   jamais de conversion ffmpeg sur du PCM brut. En cas d'échec, l'erreur
+   remonte en `HomeAssistantError` générique — jamais de clé ni de
+   texte parlé dans les logs.
 
-Le modèle de synthèse vocale est fixe (`voxtral-mini-tts-3-0`) ; la langue
-supportée suit l'option **Langue de transcription** (le pipeline utilise
-STT et TTS dans la même langue) et l'entité partage l'appareil de service
-du fournisseur STT.
+La voix suit l'option **Voix de synthèse vocale** ; la langue supportée
+suit l'option **Langue de transcription** (le pipeline utilise STT et
+TTS dans la même langue) et l'entité partage l'appareil de service des
+autres entités.
 
 ## FAQ
 
@@ -265,6 +283,23 @@ polies, et l'intégration récupère automatiquement dès que le réseau revient
    dans un instant. » est renvoyée, aucune exception n'apparaît dans les
    logs, et tout remarche dès le retour du réseau.
 
+### 4. Mémoire de conversation (1.2.0)
+
+1. Parler : « Quelle température fait-il au salon ? ».
+2. Puis, dans la même conversation : « Et à côté ? ».
+3. Attendu : la deuxième réponse cible la pièce demandée — la requête
+   envoyée à Mistral contient l'historique (`user`/`assistant`) du tour
+   précédent (visible en log debug, sans secret).
+
+### 5. TTS en flux (1.2.0)
+
+1. Pipeline → satellite Voice PE : dicter une phrase demandant une
+   réponse longue (ex. « Raconte-moi ta journée »).
+2. Attendu : le satellite commence à parler **avant** la fin de la
+   génération (chunks `speech.audio.delta`), la requête part avec
+   `stream=true` et `response_format=wav`, sans erreur ffmpeg dans les
+   logs.
+
 ## Contrat API Mistral utilisé
 
 ### WebSocket temps réel (transcription)
@@ -290,16 +325,33 @@ serveur ◀── transcription.done       (texte complet, langue, usage)
 
 ### Chat completions (agent de conversation)
 
-- `POST /v1/chat/completions` avec :
+- `POST /v1/chat/completions` **en flux SSE** (`client.chat.stream_async`)
+  avec :
   - `model` : le modèle choisi (options), issu de `GET /v1/models` ;
-  - `messages` : pre-prompt système + historique (user / assistant / tool) ;
+  - `messages` : pre-prompt système + historique de la conversation
+    (user / assistant / tool, plafonné à 40 messages) ;
   - `tools` / `tool_choice="auto"` : outils Assist de HA convertis au
     schéma `{"type": "function", "function": {"name", "description",
     "parameters"}}` (JSON Schema des paramètres) ;
   - `max_tokens` : 150 (réponses courtes, style parlé).
-- Boucle de tool calling : `tool_calls` → exécution côté HA via l'API LLM →
-  messages `{"role": "tool", "tool_call_id", "content"}` → nouvel appel,
-  max 5 itérations.
+- Boucle de tool calling : deltas `tool_calls` (arguments assemblés par
+  index) → exécution côté HA via l'API LLM → messages
+  `{"role": "tool", "tool_call_id", "content"}` → nouvel appel,
+  max 5 itérations. Les deltas de contenu sont poussés dans le `ChatLog`
+  HA (diffusables au TTS par le pipeline).
+
+### Audio speech (synthèse vocale)
+
+- `POST /v1/audio/speech` (`client.audio.speech.complete[_async]`) avec :
+  - `model` : `voxtral-mini-tts-3-0` ;
+  - `input` : le texte à parler ; `voice_id` seulement si l'option
+    **Voix de synthèse vocale** est renseignée ;
+  - `response_format` : le format du consommateur via l'option Home
+    Assistant `preferred_format` (wav / mp3 / flac / opus, MP3 défaut) ;
+  - `stream=true` pour le pipeline Assist : serveur → événements
+    `speech.audio.delta` (base64, décodés chunk par chunk) puis
+    `speech.audio.done` ; sans flux pour `tts.speak` : `audio_data`
+    complet en base64.
 
 ### Modèles
 
@@ -336,8 +388,9 @@ clé n'est loguée), CI GitHub Actions sur chaque PR (hassfest + ruff).
 Les tests couvrent la logique pure (conversion des outils, filtrage des
 modèles + préférence `-latest`, pre-prompt par défaut, plage
 `target_streaming_delay_ms` 80–2400) et les comportements externes
-(config flow, options, STT nominal/erreur/fermeture, TTS nominal/erreur,
-boucle tool calling, erreur API → valeur de modèle conservée et réponse
+(config flow, options, STT nominal/erreur/fermeture, TTS sans flux et en
+flux, agent conversation : mémoire multi-tours, deltas streaming, boucle
+tool calling, erreur API → valeur de modèle conservée et réponse
 polie).
 
 ## Licence

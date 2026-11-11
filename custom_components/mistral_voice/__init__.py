@@ -3,19 +3,14 @@
 Charge et décharge les entrées de configuration. Client API Mistral
 unique par entrée (construit paresseusement, sans requête au setup) via
 `MistralVoiceData` ; les plateformes STT (fournisseur de transcription
-en flux) et TTS (fournisseur de synthèse vocale) sont chargées ici ;
-l'agent de conversation (agent de service enregistré
-programmatiquement, pas une entité) est enregistré auprès du
-Pipeline Assist via `async_set_agent` puis désenregistré au
-unload via `async_unset_agent`.
+en flux), TTS (fournisseur de synthèse vocale en flux) et conversation
+(agent `ConversationEntity` avec mémoire, enregistré auprès du Pipeline
+Assist à la création de l'entité puis désenregistré à sa suppression)
+sont chargées ici.
 """
 
 from __future__ import annotations
 
-from homeassistant.components.conversation import (
-    async_set_agent,
-    async_unset_agent,
-)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -24,12 +19,11 @@ import voluptuous as vol
 
 from .api import MistralVoiceData
 from .const import DOMAIN
-from .conversation import MistralVoiceAgent
 
-# Plateformes à charger pour chaque entrée. L'agent de conversation n'est
-# pas une plateforme : il est enregistré programmatiquement ci-dessous
-# (pattern de google_generative_ai_conversation / openai_conversation).
-PLATFORMS: list[Platform] = [Platform.STT, Platform.TTS]
+# Plateformes à charger pour chaque entrée (STT, TTS et l'agent de
+# conversation en entité — l'agent s'enregistre de lui-même auprès du
+# Pipeline Assist à la création de l'entité).
+PLATFORMS: list[Platform] = [Platform.STT, Platform.TTS, Platform.CONVERSATION]
 
 # Intégration exclusivement configurable via l'UI : aucune config YAML acceptée.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -47,13 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # État partagé (client SDK construit paresseusement, clé jamais exposée).
     hass.data[DOMAIN][entry.entry_id] = MistralVoiceData(entry)
 
-    # Rien de core à recharger tant qu'aucune plateforme n'existe encore.
-    if PLATFORMS:
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Agent de conversation : enregistré programmatiquement auprès du
-    # Pipeline Assist (pas une entité).
-    async_set_agent(hass, entry, MistralVoiceAgent(hass, entry))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
@@ -61,12 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Décharger une entrée de configuration Mistral Voice."""
-    unload_ok = True
-    if PLATFORMS:
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-    # Désenregistrement de l'agent de conversation auprès du Pipeline Assist.
-    async_unset_agent(hass, entry)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     hass.data[DOMAIN].pop(entry.entry_id, None)
     if not hass.data[DOMAIN]:

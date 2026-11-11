@@ -1,97 +1,99 @@
-"""Agent de conversation Mistral pour le Pipeline Assist.
+"""Agent de conversation Mistral : entité conversation dotée de mémoire.
 
-Fonctionnement pour chaque énoncé (`async_process`) :
+L'agent étend `conversation.ConversationEntity` (pattern
+openai_conversation / google_generative_ai_conversation sur Home
+Assistant 2026.10) : le pipeline Assist ouvre un `ChatLog` persistant
+par conversation (`homeassistant.components.conversation`), ce qui
+donne la **mémoire multi-tours** — chaque énoncé est traité avec
+l'historique de la conversation, plafonné à
+`MAX_HISTORY_MESSAGES` messages coupés sur une frontière de tour
+utilisateur (jamais un appel d'outil séparé de sa réponse).
 
-1. récupération de l'API LLM Assist de Home Assistant via
-   `llm.async_get_api(hass, llm.LLM_API_ASSIST, user_input.as_llm_context(DOMAIN))`
-   — le mécanisme d'outils de HA n'est PAS réimplémenté ;
-2. conversion des outils (`llm.Tool`, schéma `probatio.Schema`) au format
-   function-calling de Mistral (`{"type": "function", "function": {…}}`) ;
-3. appel `POST /v1/chat/completions` via le client du ticket #4
-   (`api.async_chat_complete`), `tool_choice="auto"`, `max_tokens` capé
-   (`const.MAX_TOKENS`) ;
-4. boucle de tool calling : chaque `tool_call` est exécuté côté HA via
-   `api_instance.async_call_tool(llm.ToolInput(...))`, le résultat repart
-   en message `{"role": "tool", "tool_call_id": …, "content": …}` puis la
-   conversation reboucle (limite `const.MAX_TOOL_ITERATIONS`) ;
-5. le texte final (dernier message assistant sans tool_call) alimente une
-   `IntentResponse` française, dans une `ConversationResult`.
+Pour chaque énoncé (`_async_handle_message`) :
+
+1. `chat_log.async_provide_llm_data(...)` attache l'API LLM Assist de HA
+   (`llm.LLM_API_ASSIST` : outils issus des entités exposées à Assist)
+   et compose le pre-prompt système (surcharge utilisateur ou valeur
+   par défaut) ;
+2. les tools (`llm.Tool`, schéma `probatio.Schema`) sont convertis au
+   format function-calling Mistral, l'historique du `ChatLog` en
+   messages Mistral ( système / user / assistant / tool ) ;
+3. la réponse arrive en **flux** : `client.chat.stream_async`
+   (POST /v1/chat/completions SSE) via `api.async_chat_complete_stream`,
+   les deltas de contenu sont poussés dans
+   `chat_log.async_add_delta_content_stream` — c'est ce flux qui
+   alimente le TTS du pipeline au fil de l'eau (streaming bout en bout
+   quand le TTS supporte l'entrée en flux, i.e. notre plateforme `tts`) ;
+4. boucle de tool calling : chaque tool_call est exécuté par le ChatLog
+   via l'API LLM, le résultat repart en message `tool`, la conversation
+   reboucle (limite `MAX_TOOL_ITERATIONS`) jusqu'au texte final.
 
 En cas d'erreur (API injoignable, outil en échec), une réponse polie en
 français est renvoyée : aucune exception, aucun détail de requête et
 surtout jamais la clé API ne sortent de ce module.
-
-Les définitions d'outils converties et le pre-prompt actif sont mis en
-cache (réutilisation du même objet dict / même valeur lru) : les requêtes
-successives sont byte-stables. Le parcours est instrumenté en log debug
-(modèle, itération, finish_reason, tool_calls, tailles de contenu) pour
-permettre le diagnostic sans jamais y loguer de secret.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from functools import lru_cache
+from collections.abc import AsyncGenerator
 import json
 import logging
-from types import MappingProxyType
 from typing import Any, Literal, override
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent, llm
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 import probatio
 
-from .api import MistralApiError, async_chat_complete
+from .api import MistralApiError, MistralVoiceData, async_chat_complete_stream
 from .config_flow import resolve_system_prompt
 from .const import (
     CONF_MODEL,
     CONF_SYSTEM_PROMPT,
-    DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DOMAIN,
     ERROR_LOOP_LIMIT_TEXT,
     ERROR_RESPONSE_TEXT,
+    MANUFACTURER,
+    MAX_HISTORY_MESSAGES,
     MAX_TOKENS,
     MAX_TOOL_ITERATIONS,
     TOOL_CHOICE_AUTO,
 )
 
+MistralVoiceConfigEntry = ConfigEntry[MistralVoiceData]
+
 _LOGGER = logging.getLogger(__name__)
+
+PARALLEL_UPDATES = 0
 
 # Repli quand un schéma d'outils ne se convertit pas en JSON Schema :
 # un schéma objet ouvert, sûr pour le function-calling Mistral.
-_FALLBACK_JSON_SCHEMA: dict[str, Any] = MappingProxyType(
-    {"type": "object", "properties": {}, "additionalProperties": False}
-)
+_FALLBACK_JSON_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
 
-@lru_cache(maxsize=8)
-def _resolve_system_prompt_cached(system_prompt_option: str | None) -> str:
-    """Pre-prompt actif mémorisé (byte-stable entre les appels).
-
-    La surcharge utilisateur (`option system_prompt` non vide) prime ;
-    sinon le pre-prompt par défaut de `const.py` est utilisé (même
-    comportement que `resolve_system_prompt` du config flow). La mémoire
-    est indexée par la valeur de l'option : même option -> même objet str.
-    """
-    return resolve_system_prompt(
-        MappingProxyType({CONF_SYSTEM_PROMPT: str(system_prompt_option or "")})
-    )
+def _resolve_system_prompt(options: dict[str, Any]) -> str:
+    """Pre-prompt actif : surcharge utilisateur ou valeur par défaut."""
+    prompt = str(options.get(CONF_SYSTEM_PROMPT) or "").strip()
+    return prompt or resolve_system_prompt({})
 
 
-def _tool_definition(tool: llm.Tool) -> dict[str, Any]:
+def _tool_definition(tool: llm.Tool, custom_serializer: Any | None) -> dict[str, Any]:
     """Convertir un `llm.Tool` au format function-calling Mistral.
 
-    Le schéma des paramètres (`probatio.Schema`) est rendu en JSON Schema
-    via `probatio.to_openapi` — conversion infaillible : en cas d'échec,
-    le repli est un schéma objet ouvert plutôt qu'une exception.
+    Le schéma des paramètres (`probatio.Schema`) est rendu en JSON
+    Schema via `probatio.to_openapi` — conversion infaillible : en cas
+    d'échec, le repli est un schéma objet ouvert plutôt qu'une exception.
     """
     try:
-        parameters = dict(probatio.to_openapi(tool.parameters))
+        parameters = dict(
+            probatio.to_openapi(tool.parameters, custom_serializer=custom_serializer)
+        )
     except Exception:
         _LOGGER.warning(
             "Outil %s : schéma de paramètres non convertible, repli générique.",
@@ -108,279 +110,102 @@ def _tool_definition(tool: llm.Tool) -> dict[str, Any]:
     }
 
 
-def _tool_digest(tool_def: Mapping[str, Any]) -> str:
-    """Empreinte byte-stable d'une définition d'outil (tri des clés)."""
-    return json.dumps(tool_def, sort_keys=True, ensure_ascii=False, default=str)
+def _delta_text(content: Any) -> str:
+    """Contenu texte d'un delta (chaîne, ou liste de parties typées).
 
-
-@dataclass(slots=True)
-class _CachedToolDef:
-    """Définition d'outil convertie, avec l'empreinte de sa source.
-
-    Réutilisée entre les appels tant que l'empreinte (description +
-    schéma des paramètres) ne change pas : la même instance de dict est
-    renvoyée, donc les requêtes successives sont byte-stables.
+    Certains modèles hébergés (ex. `zai-glm-5-3-flash`, raisonnement)
+    renvoient `content` sous forme d'une liste de parties : les parties
+    texte sont concaténées, les autres ignorées.
     """
-
-    digest: str
-    definition: dict[str, Any]
-
-
-class MistralVoiceAgent(conversation.AbstractConversationAgent):
-    """Agent de conversation Mistral (enregistré programmatiquement).
-
-    L'agent n'est pas une entité `conversation` : il est enregistré au
-    setup de l'entrée via `conversation.async_set_agent` puis
-    désenregistré au unload, comme le pipeline Assist l'attend pour un
-    agent de service (voir google_generative_ai_conversation / openai).
-    """
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Initialiser l'agent pour une entrée de configuration."""
-        self.hass = hass
-        self.entry = entry
-        # Cache des définitions d'outils converties, indexé par nom d'outil.
-        self._tool_defs: dict[str, _CachedToolDef] = {}
-
-    @property
-    @override
-    def supported_languages(self) -> Literal["*"]:
-        """Langues supportées : toutes (le modèle de chat s'adapte)."""
-        return MATCH_ALL
-
-    def convert_tool(self, tool: llm.Tool) -> dict[str, Any]:
-        """Conversion d'outil avec cache byte-stable (par nom d'outil)."""
-        fresh = _tool_definition(tool)
-        fresh_digest = _tool_digest(fresh)
-        cached = self._tool_defs.get(tool.name)
-        if cached is None or cached.digest != fresh_digest:
-            cached = _CachedToolDef(digest=fresh_digest, definition=fresh)
-            self._tool_defs[tool.name] = cached
-        return cached.definition
-
-    @override
-    async def async_process(
-        self, user_input: conversation.ConversationInput
-    ) -> conversation.ConversationResult:
-        """Traiter un énoncé : chat/completions (+ boucle tool calling)."""
-        options = self.entry.options
-        model = str(options.get(CONF_MODEL) or DEFAULT_MODEL)
-        system_prompt = _resolve_system_prompt_cached(
-            str(options.get(CONF_SYSTEM_PROMPT) or "") or None
-        )
-
-        try:
-            api_instance = await llm.async_get_api(
-                self.hass,
-                llm.LLM_API_ASSIST,
-                user_input.as_llm_context(DOMAIN),
-            )
-        except Exception:
-            _LOGGER.warning(
-                "Conversation %s : API LLM Assist indisponible.", user_input.agent_id
-            )
-            return _error_result(user_input)
-
-        converted_tools = [self.convert_tool(tool) for tool in api_instance.tools]
-        tool_choice = TOOL_CHOICE_AUTO if converted_tools else None
-        _LOGGER.debug(
-            "Conversation %s : modèle %s, %d outils exposés, énoncé de %d caractères.",
-            user_input.agent_id,
-            model,
-            len(converted_tools),
-            len(user_input.text),
-        )
-
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input.text},
-        ]
-
-        try:
-            for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
-                response = await async_chat_complete(
-                    self.hass,
-                    self.entry,
-                    model=model,
-                    messages=messages,
-                    tools=converted_tools or None,
-                    tool_choice=tool_choice,
-                    max_tokens=MAX_TOKENS,
-                )
-                message = _first_message(response)
-                tool_calls = _message_tool_calls(message)
-                _LOGGER.debug(
-                    "Conversation %s : itération %d/%d, finish_reason=%s, "
-                    "%d tool_calls, contenu de %d caractères.",
-                    user_input.agent_id,
-                    iteration,
-                    MAX_TOOL_ITERATIONS,
-                    _finish_reason(response),
-                    len(tool_calls),
-                    len(_message_content(message)),
-                )
-
-                if not tool_calls:
-                    return _result_with_speech(user_input, _message_content(message))
-
-                # L'assistant demande des outils : rejouer son message avec
-                # ses tool_calls, puis ajouter les résultats en messages `tool`.
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": _message_content(message),
-                        "tool_calls": tool_calls,
-                    }
-                )
-                for tool_call in tool_calls:
-                    content = await self._async_execute_tool(api_instance, tool_call)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": _field(tool_call, "id") or "",
-                            "content": content,
-                        }
-                    )
-        except MistralApiError:
-            # Journalisation volontairement générique : ni la clé API, ni
-            # le détail de l'exception (qui peut contenir la requête).
-            _LOGGER.warning(
-                "Conversation %s : échec de l'appel chat/completions Mistral.",
-                user_input.agent_id,
-            )
-            return _error_result(user_input)
-        except Exception:
-            _LOGGER.warning(
-                "Conversation %s : échec inattendu du traitement de l'énoncé.",
-                user_input.agent_id,
-            )
-            return _error_result(user_input)
-
-        # Limite d'itérations atteinte sans réponse finale : réponse de repli.
-        _LOGGER.warning(
-            "Conversation %s : limite de %d itérations de tool calling atteinte.",
-            user_input.agent_id,
-            MAX_TOOL_ITERATIONS,
-        )
-        return _result_with_speech(
-            user_input, ERROR_LOOP_LIMIT_TEXT, error_response=True
-        )
-
-    async def _async_execute_tool(self, api_instance: Any, tool_call: Any) -> str:
-        """Exécuter un tool_call côté HA et sérialiser le résultat en JSON.
-
-        Le mécanisme HA (`async_call_tool`) est utilisé tel quel ; en cas
-        d'échec, un contenu d'erreur générique part au modèle (pas de
-        détail d'exception).
-        """
-        function = _field(tool_call, "function") or {}
-        name = _field(function, "name") or ""
-        raw_arguments = _field(function, "arguments") or ""
-
-        try:
-            tool_args = _parse_tool_args(raw_arguments)
-        except ValueError:  # JSONDecodeError est une sous-classe de ValueError
-            _LOGGER.warning("Outil %s : arguments non décodables.", name)
-            return json.dumps({"error": "invalid_arguments"})
-
-        try:
-            result = await api_instance.async_call_tool(
-                llm.ToolInput(tool_name=name, tool_args=tool_args)
-            )
-        except Exception:
-            _LOGGER.warning("Outil %s : échec d'exécution côté Home Assistant.", name)
-            return json.dumps({"error": "tool_execution_failed"})
-
-        data = _field(result, "data")
-        data = data if data is not None else {}
-        content = json.dumps(data, default=str)
-        _LOGGER.debug(
-            "Outil %s : exécuté, résultat de %d caractères.", name, len(content)
-        )
-        return content
-
-
-def _parse_tool_args(raw_arguments: Any) -> dict[str, Any]:
-    """Décoder les arguments d'un tool_call (dict, ou chaîne JSON)."""
-    if isinstance(raw_arguments, Mapping):
-        return dict(raw_arguments)
-    if isinstance(raw_arguments, str) and raw_arguments.strip():
-        decoded = json.loads(raw_arguments)
-        if isinstance(decoded, Mapping):
-            return dict(decoded)
-    return {}
-
-
-def _field(obj: Any, key: str) -> Any:
-    """Lire un champ d'un modèle SDK (attribut) ou d'un dict, sans supposer."""
-    if obj is None:
-        return None
-    if isinstance(obj, Mapping):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _first_message(response: Any) -> Any:
-    """Message du premier choix de la réponse chat/completions."""
-    choices = _field(response, "choices") or []
-    if not choices:
-        return None
-    return _field(choices[0], "message")
-
-
-def _finish_reason(response: Any) -> str:
-    """`finish_reason` du premier choix de la réponse (vide si absent).
-
-    Informatif pour le diagnostic (réponse tronquée par `max_tokens` :
-    `length` avec un contenu vide, typique des modèles de raisonnement).
-    """
-    choices = _field(response, "choices") or []
-    if not choices:
-        return ""
-    reason = _field(choices[0], "finish_reason")
-    return reason if isinstance(reason, str) else ""
-
-
-def _message_content(message: Any) -> str:
-    """Contenu texte d'un message (str vide si absent).
-
-    Certains modèles hébergés (ex. `zai-glm-5-3-flash`, raisonnement/
-    multimodal) renvoient `content` sous forme d'une **liste de parties
-    typées** au lieu d'une chaîne : les parties texte sont concaténées,
-    les autres (raisonnement, etc.) sont ignorées — jamais parlées ni
-    renvoyées au modèle en message suivant.
-    """
-    content = _field(message, "content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        text_parts: list[str] = []
+        parts: list[str] = []
         for part in content:
-            if _field(part, "type") == "text":
-                text = _field(part, "text")
-                if isinstance(text, str):
-                    text_parts.append(text)
-        return "".join(text_parts)
+            part_type = getattr(part, "type", None)
+            if isinstance(part, dict):
+                part_type = part.get("type")
+            if part_type != "text":
+                continue
+            text = getattr(part, "text", None)
+            if isinstance(part, dict):
+                text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
     return ""
 
 
-def _message_tool_calls(message: Any) -> list[dict[str, Any]]:
-    """Tool_calls normalisés d'un message (liste vide si aucun)."""
-    raw = _field(message, "tool_calls") or []
-    normalised: list[dict[str, Any]] = []
-    for tool_call in raw:
-        function = _field(tool_call, "function") or {}
-        normalised.append(
-            {
-                "id": _field(tool_call, "id") or "",
-                "type": "function",
-                "function": {
-                    "name": _field(function, "name") or "",
-                    "arguments": _field(function, "arguments") or "",
-                },
+def _message_content(content: conversation.Content) -> str:
+    """Contenu parlable d'un message du ChatLog (chaîne vide si aucun)."""
+    return _delta_text(getattr(content, "content", None))
+
+
+def _convert_content_to_messages(
+    chat_content: list[conversation.Content],
+) -> list[dict[str, Any]]:
+    """Convertir un historique ChatLog en messages Mistral.
+
+    Le pre-prompt système de `chat_log` est converti en message
+    `system` ; les contenus assistant avec tool_calls en messages
+    `assistant` rejouant leurs appels ; les résultats d'outils en
+    messages `tool`. Les contenus assistant sans texte et sans appel
+    sont ignorés.
+    """
+    messages: list[dict[str, Any]] = []
+    for content in chat_content:
+        if isinstance(content, conversation.ToolResultContent):
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": content.tool_call_id,
+                    "content": json.dumps(content.result.data, default=str),
+                }
+            )
+            continue
+        if isinstance(content, conversation.AssistantContent):
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": _message_content(content),
             }
-        )
-    return normalised
+            if content.tool_calls:
+                message["tool_calls"] = [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.tool_name,
+                            "arguments": json.dumps(tool_call.tool_args),
+                        },
+                    }
+                    for tool_call in content.tool_calls
+                ]
+            if message.get("tool_calls") or message["content"]:
+                messages.append(message)
+            continue
+        role = getattr(content, "role", None)
+        if isinstance(role, str) and role in ("system", "user"):
+            messages.append({"role": role, "content": _message_content(content)})
+    return messages
+
+
+def _cap_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Plafonner l'historique envoyé au modèle (le pre-prompt reste).
+
+    La coupure se fait toujours sur une frontière de tour utilisateur :
+    un message `tool` ou un message assistant avec tool_calls ne peut
+    jamais se retrouver détaché de sa suite (l'API rejeterait la
+    séquence).
+    """
+    if len(messages) <= MAX_HISTORY_MESSAGES:
+        return messages
+    system, rest = messages[0], messages[1:]
+    for index, message in enumerate(rest):
+        if message["role"] == "user" and len(rest) - index <= MAX_HISTORY_MESSAGES - 1:
+            return [system, *rest[index:]]
+    # Aucune frontière exploitable (peu probable) : garder l'ordre strict
+    # en tronquant simplement à la limite moins le pre-prompt.
+    return [system, *rest[-(MAX_HISTORY_MESSAGES - 1) :]]
 
 
 def _result_with_speech(
@@ -388,13 +213,9 @@ def _result_with_speech(
     text: str,
     error_response: bool = False,
 ) -> conversation.ConversationResult:
-    """Construire le résultat de conversation (réponse parlée en français).
-
-    Un texte vide est remplacé par la réponse d'erreur polie. En cas
-    d'erreur, la réponse est typée `IntentResponseType.ERROR`.
-    """
+    """Construire un résultat de conversation (réponse parlée en français)."""
     final_text = text or ERROR_RESPONSE_TEXT
-    response = intent.IntentResponse(user_input.language or DEFAULT_LANGUAGE)
+    response = intent.IntentResponse(language=user_input.language or "fr")
     response.async_set_speech(final_text)
     if error_response:
         response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, final_text)
@@ -403,8 +224,229 @@ def _result_with_speech(
     )
 
 
-def _error_result(
-    user_input: conversation.ConversationInput,
-) -> conversation.ConversationResult:
-    """Réponse d'erreur polie en français (jamais de détail d'exception)."""
-    return _result_with_speech(user_input, "", error_response=True)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: MistralVoiceConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+) -> None:
+    """Ajouter l'entité agent de conversation de cette entrée."""
+    async_add_entities([MistralVoiceAgentEntity(config_entry)])
+
+
+class MistralVoiceAgentEntity(conversation.ConversationEntity):
+    """Agent de conversation Mistral (entité avec mémoire et streaming)."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "mistral_agent"
+    # Le pipeline peut diffuser les deltas de l'agent vers le TTS.
+    _attr_supports_streaming = True
+    # L'agent contrôle la maison via les outils Assist.
+    _attr_supported_features = conversation.ConversationEntityFeature.CONTROL
+
+    def __init__(self, entry: MistralVoiceConfigEntry) -> None:
+        """Initialiser l'entité avec l'entrée de configuration."""
+        self.entry = entry
+        self._attr_unique_id = entry.entry_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            manufacturer=MANUFACTURER,
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+    @property
+    @override
+    def supported_languages(self) -> list[str] | Literal["*"]:
+        """Langues supportées : toutes (le modèle de chat s'adapte)."""
+        return MATCH_ALL
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Enregistrement auprès du Pipeline Assist (id d'entrée, compat)."""
+        await super().async_added_to_hass()
+        conversation.async_set_agent(self.hass, self.entry, self)
+
+    @override
+    async def async_will_remove_from_hass(self) -> None:
+        """Désenregistrement de l'agent auprès du Pipeline Assist."""
+        conversation.async_unset_agent(self.hass, self.entry)
+        await super().async_will_remove_from_hass()
+
+    @override
+    async def _async_handle_message(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> conversation.ConversationResult:
+        """Traiter un énoncé : historique + chat/completions en flux."""
+        options = self.entry.options
+        system_prompt = _resolve_system_prompt(options)
+        try:
+            await chat_log.async_provide_llm_data(
+                user_input.as_llm_context(DOMAIN),
+                llm.LLM_API_ASSIST,
+                system_prompt,
+                user_input.extra_system_prompt,
+            )
+        except conversation.ConverseError as err:
+            return err.as_conversation_result()
+        except Exception:
+            _LOGGER.warning(
+                "Conversation %s : API LLM Assist indisponible.",
+                chat_log.conversation_id,
+            )
+            return _result_with_speech(user_input, "", error_response=True)
+
+        try:
+            await self._async_handle_chat_log(chat_log)
+        except MistralApiError:
+            # Journalisation volontairement générique : ni la clé API, ni
+            # le détail de l'exception (qui peut contenir la requête).
+            _LOGGER.warning(
+                "Conversation %s : échec de l'appel chat/completions Mistral.",
+                chat_log.conversation_id,
+            )
+            return _result_with_speech(user_input, "", error_response=True)
+        except HomeAssistantError:
+            _LOGGER.warning(
+                "Conversation %s : échec côté Home Assistant pendant "
+                "l'exécution d'un outil.",
+                chat_log.conversation_id,
+            )
+            return _result_with_speech(user_input, "", error_response=True)
+
+        if chat_log.unresponded_tool_results:
+            # Limite d'itérations atteinte sans réponse finale.
+            _LOGGER.warning(
+                "Conversation %s : limite de %d itérations de tool calling atteinte.",
+                chat_log.conversation_id,
+                MAX_TOOL_ITERATIONS,
+            )
+            return _result_with_speech(
+                user_input, ERROR_LOOP_LIMIT_TEXT, error_response=True
+            )
+
+        try:
+            result = conversation.async_get_result_from_chat_log(user_input, chat_log)
+        except HomeAssistantError:
+            # Pas de réponse parlable exploitable (contenu absent) :
+            # réponse polie plutôt qu'une erreur remontée au pipeline.
+            return _result_with_speech(user_input, "", error_response=True)
+        # Le speech du résultat est un dict {"plain": {"speech": …}} ;
+        # une réponse vide (trônquée par max_tokens, contenu absent) est
+        # remplacée par la réponse polie.
+        plain = (result.response.speech or {}).get("plain") or {}
+        spoken = plain.get("speech") or ""
+        if not spoken.strip():
+            return _result_with_speech(user_input, "", error_response=True)
+        return result
+
+    async def _async_handle_chat_log(self, chat_log: conversation.ChatLog) -> None:
+        """Générer la réponse en flux, avec la boucle de tool calling.
+
+        Chaque itération diffuse les deltas de la réponse au ChatLog
+        (ce qui exécute les tool calls via l'API LLM côté HA) ; l'historique
+        Mistral est prolongé avec les contenus produits. La boucle
+        s'arrête quand la dernière réponse ne demande plus d'outil.
+        """
+        model = str(self.entry.options.get(CONF_MODEL) or DEFAULT_MODEL)
+        messages = _cap_history(_convert_content_to_messages(chat_log.content))
+
+        converted_tools: list[dict[str, Any]] = []
+        if chat_log.llm_api:
+            converted_tools = [
+                _tool_definition(tool, chat_log.llm_api.custom_serializer)
+                for tool in chat_log.llm_api.tools
+            ]
+        tool_choice = TOOL_CHOICE_AUTO if converted_tools else None
+
+        for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
+            stream = await async_chat_complete_stream(
+                self.hass,
+                self.entry,
+                model=model,
+                messages=messages,
+                tools=converted_tools or None,
+                tool_choice=tool_choice,
+                max_tokens=MAX_TOKENS,
+            )
+            contents: list[conversation.Content] = []
+            async for content in chat_log.async_add_delta_content_stream(
+                self.entity_id,
+                _transform_stream(stream),
+            ):
+                contents.append(content)
+
+            _LOGGER.debug(
+                "Conversation %s : itération %d/%d, %d contenus produits (tools=%s).",
+                chat_log.conversation_id,
+                iteration,
+                MAX_TOOL_ITERATIONS,
+                len(contents),
+                bool(contents and getattr(contents[0], "tool_calls", None)),
+            )
+            messages.extend(_convert_content_to_messages(contents))
+
+            if not chat_log.unresponded_tool_results:
+                break
+
+
+async def _transform_stream(
+    stream: Any,
+) -> AsyncGenerator[dict[str, Any]]:
+    """Transformer le flux SSE Mistral en deltas du protocole ChatLog.
+
+    Yield successivement des `AssistantContentDeltaDict` : ouverture du
+    message assistant (`role`), deltas de contenu (texte parlé, diffusé
+    au pipeline au fil de l'eau), puis — en fin de tour — les tool calls
+    assemblés (arguments concaténés par index, comme le protocole
+    streaming de l'API). Les deltas ne portent jamais les appels
+    d'outils avant que leurs arguments soient complets : le ChatLog
+    démarre l'exécution dès leur apparition.
+    """
+    tool_calls: dict[int, dict[str, str]] = {}
+    yield {"role": "assistant"}
+
+    async for event in stream:
+        data = getattr(event, "data", None)
+        choices = getattr(data, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            continue
+        if text := _delta_text(getattr(delta, "content", None)):
+            yield {"content": text}
+        for tool_call in getattr(delta, "tool_calls", None) or []:
+            index = getattr(tool_call, "index", 0) or 0
+            entry = tool_calls.setdefault(index, {"id": "", "name": ""})
+            function = getattr(tool_call, "function", None)
+            if call_id := getattr(tool_call, "id", None):
+                entry["id"] = str(call_id)
+            if function is not None:
+                if name := getattr(function, "name", None):
+                    entry["name"] = str(name)
+                if arguments := getattr(function, "arguments", None):
+                    entry.setdefault("arguments", "")
+                    entry["arguments"] += str(arguments)
+
+    if tool_calls:
+        inputs: list[llm.ToolInput] = []
+        for entry in tool_calls.values():
+            try:
+                tool_args = json.loads(entry.get("arguments") or "{}")
+                if not isinstance(tool_args, dict):
+                    raise ValueError
+            except ValueError:
+                _LOGGER.warning(
+                    "Outil %s : arguments non décodables, arguments vides.",
+                    entry["name"],
+                )
+                tool_args = {}
+            inputs.append(
+                llm.ToolInput(
+                    tool_name=entry["name"] or "",
+                    tool_args=tool_args,
+                    id=entry["id"] or None,
+                )
+            )
+        yield {"tool_calls": inputs}
