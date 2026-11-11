@@ -9,7 +9,7 @@ Appareil Home Assistant Voice PE qui capte le micro et joue la réponse audio. L
 _Avoid_: enceinte, micro, device vocal
 
 **Pipeline Assist** :
-Chaîne de traitement vocal de Home Assistant (STT → agent de conversation → TTS) alimentée par un satellite vocal.
+Chaîne de traitement vocal de Home Assistant (STT → agent de conversation → TTS) alimentée par un satellite vocal ; chaque étape est fournie par l'intégration (STT en flux, agent Mistral Voice, fournisseur TTS).
 _Avoid_: pipeline audio, chaîne vocale
 
 **Fournisseur STT** :
@@ -23,6 +23,10 @@ _Avoid_: streaming générique, partials
 **Agent de conversation** :
 Composant Home Assistant qui reçoit le texte transcrit et produit la réponse vocale. Ici : appels `chat/completions` Mistral avec outils.
 _Avoid_: chatbot, assistant IA générique
+
+**Fournisseur TTS** :
+Entité Home Assistant qui synthétise en audio la réponse de l'agent de conversation. Ici : appel unique `POST /v1/audio/speech` au modèle de synthèse vocale, réponse audio base64 décodée en MP3 et jouée par le satellite vocal.
+_Avoid_: lecteur audio, service TTS, voix (pour l'entité)
 
 **Outil** :
 Fonction Home Assistant exposée à Assist (ex. allumer une entité), convertie au schéma function-calling de Mistral puis exécutée côté HA ; le résultat repart en message `tool`.

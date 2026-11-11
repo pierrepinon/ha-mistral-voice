@@ -2,9 +2,10 @@
 
 Charge et décharge les entrées de configuration. Client API Mistral
 unique par entrée (construit paresseusement, sans requête au setup) via
-`MistralVoiceData` ; la plateforme STT (fournisseur de transcription en
-flux) est chargée ici ; l'agent de conversation (agent de service
-enregistré programmatiquement, pas une entité) est enregistré auprès du
+`MistralVoiceData` ; les plateformes STT (fournisseur de transcription
+en flux) et TTS (fournisseur de synthèse vocale) sont chargées ici ;
+l'agent de conversation (agent de service enregistré
+programmatiquement, pas une entité) est enregistré auprès du
 Pipeline Assist via `async_set_agent` puis désenregistré au
 unload via `async_unset_agent`.
 """
@@ -28,7 +29,7 @@ from .conversation import MistralVoiceAgent
 # Plateformes à charger pour chaque entrée. L'agent de conversation n'est
 # pas une plateforme : il est enregistré programmatiquement ci-dessous
 # (pattern de google_generative_ai_conversation / openai_conversation).
-PLATFORMS: list[Platform] = [Platform.STT]
+PLATFORMS: list[Platform] = [Platform.STT, Platform.TTS]
 
 # Intégration exclusivement configurable via l'UI : aucune config YAML acceptée.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)

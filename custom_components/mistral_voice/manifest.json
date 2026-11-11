@@ -7,7 +7,8 @@
   "config_flow": true,
   "dependencies": [
     "conversation",
-    "stt"
+    "stt",
+    "tts"
   ],
   "documentation": "https://github.com/pierrepinon/ha-mistral-voice",
   "integration_type": "service",
@@ -16,5 +17,5 @@
   "requirements": [
     "mistralai[realtime]==3.7.0"
   ],
-  "version": "1.0.2"
+  "version": "1.1.0"
 }

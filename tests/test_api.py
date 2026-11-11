@@ -210,6 +210,91 @@ async def test_async_chat_complete_wraps_sdk_errors(hass) -> None:
         )
 
 
+async def test_speech_complete_passes_model_text_and_format(hass) -> None:
+    """`audio.speech.complete` reçoit le modèle, le texte et le format."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    complete = MagicMock(return_value=SimpleNamespace(audio_data="aGVsbG8="))
+    fake_client = SimpleNamespace(
+        audio=SimpleNamespace(speech=SimpleNamespace(complete=complete))
+    )
+
+    with patch.object(api, "Mistral", return_value=fake_client):
+        response = await api.async_speech_complete(
+            hass,
+            entry,
+            model="voxtral-mini-tts-2603",
+            text="Bonjour",
+            response_format="mp3",
+        )
+
+    assert response is complete.return_value
+    complete.assert_called_once_with(
+        model="voxtral-mini-tts-2603", input="Bonjour", response_format="mp3"
+    )
+
+
+async def test_speech_complete_passes_voice_only_when_set(hass) -> None:
+    """`voice_id` n'est transmis que s'il est renseigné (vide = défaut API)."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    complete = MagicMock(return_value=SimpleNamespace(audio_data="aGVsbG8="))
+    fake_client = SimpleNamespace(
+        audio=SimpleNamespace(speech=SimpleNamespace(complete=complete))
+    )
+
+    with patch.object(api, "Mistral", return_value=fake_client):
+        await api.async_speech_complete(
+            hass,
+            entry,
+            model="voxtral-mini-tts-2603",
+            text="Bonjour",
+            response_format="mp3",
+            voice_id="",
+        )
+        assert "voice_id" not in complete.call_args.kwargs
+
+        await api.async_speech_complete(
+            hass,
+            entry,
+            model="voxtral-mini-tts-2603",
+            text="Bonjour",
+            response_format="mp3",
+            voice_id="voice-42",
+        )
+        assert complete.call_args.kwargs["voice_id"] == "voice-42"
+
+
+async def test_async_speech_complete_wraps_sdk_errors(hass) -> None:
+    """Toute erreur SDK/réseau de TTS est enrobée dans `MistralApiError`."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = api.MistralVoiceData(entry)
+
+    failing = SimpleNamespace(
+        audio=SimpleNamespace(
+            speech=SimpleNamespace(
+                complete=MagicMock(side_effect=RuntimeError("panic"))
+            )
+        )
+    )
+    with (
+        patch.object(api, "Mistral", return_value=failing),
+        pytest.raises(api.MistralApiError),
+    ):
+        await api.async_speech_complete(
+            hass,
+            entry,
+            model="voxtral-mini-tts-2603",
+            text="Bonjour",
+            response_format="mp3",
+        )
+
+
 async def test_shared_session_is_not_dedicated(hass) -> None:
     """Aucune session aiohttp dédiée : on réutilise celle de Home Assistant."""
     assert api.async_get_shared_http_session(hass) is async_get_clientsession(hass)

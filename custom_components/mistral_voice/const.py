@@ -14,6 +14,7 @@ CONF_LANGUAGE = "language"
 CONF_STREAMING_DELAY_MS = "target_streaming_delay_ms"
 CONF_SYSTEM_PROMPT = "system_prompt"
 CONF_MODEL = "model"
+CONF_VOICE = "voice"
 CONF_REFRESH_MODELS = "refresh_models"
 
 DEFAULT_LANGUAGE = "fr"
@@ -23,6 +24,16 @@ MAX_STREAMING_DELAY_MS = 2400
 
 # Modèles par défaut (la liste complète vient de GET /v1/models, jamais en dur).
 DEFAULT_MODEL = "mistral-small-latest"
+
+# Voix de synthèse vocale : identifiant d'une voix (préréglée ou clonée) du
+# compte Mistral ; vide = voix par défaut de l'API.
+DEFAULT_VOICE = ""
+
+# Synthèse vocale : appel POST /v1/audio/speech. Le modèle de TTS est fixe
+# (seul modèle de l'offre Mistral) ; la réponse est demandée en MP3
+# (extension renvoyée au Pipeline Assist, l'audio part décodé en bytes).
+TTS_MODEL = "voxtral-mini-tts-2603"
+TTS_AUDIO_FORMAT = "mp3"
 
 # Langues de transcription pour le champ `language` des options.
 SUPPORTED_LANGUAGES = {"fr", "en", "de", "es", "it"}

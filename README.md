@@ -1,14 +1,14 @@
 # Mistral Voice
 
 ![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge&logo=homeassistantcommunitystore)
-![Version](https://img.shields.io/badge/version-1.0.2-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.1.0-blue.svg?style=for-the-badge)
 ![Licence](https://img.shields.io/badge/licence-Apache%202.0-blue.svg?style=for-the-badge)
 
 [![Ouvrir dans HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pierrepinon&repository=ha-mistral-voice&category=integration)
 
 Intégration Home Assistant custom pour un **assistant vocal 100 % cloud via
-l'API Mistral** : transcription en flux (STT) et agent de conversation avec
-outils, pensés pour les satellites
+l'API Mistral** : transcription en flux (STT), agent de conversation avec
+outils et synthèse vocale (TTS), pensés pour les satellites
 [Home Assistant Voice PE](https://www.home-assistant.io/voice-pe/) et toute
 installation HAOS ~2026.10.x.
 
@@ -31,7 +31,10 @@ installation HAOS ~2026.10.x.
                            │  ├──────────────────────────┤  │    wss://api.mistral.ai/
                            │  │ Agent : Mistral Voice    │  │    /v1/audio/transcriptions/
                            │  │       (chat + outils HA) │──┼──▶ HTTPS
-                           │  └──────────────────────────┘  │    api.mistral.ai/v1/chat/completions
+                           │  ├──────────────────────────┤  │    api.mistral.ai/v1/chat/completions
+                           │  │ TTS : Synthèse vocale    │  │    api.mistral.ai/v1/audio/speech
+                           │  │      (Mistral)           │──┼──▶ HTTPS
+                           │  └──────────────────────────┘  │
                            └────────────────────────────────┘
 ```
 
@@ -41,7 +44,8 @@ La transcription en flux passe par un WebSocket initialisé par session
 (config → `input_audio.append` → `input_audio.end` → deltas →
 `transcription.done`), l'agent de conversation par
 `POST /v1/chat/completions` avec les outils Assist de HA convertis en
-function-calling Mistral.
+function-calling Mistral, la synthèse vocale par un appel unique
+`POST /v1/audio/speech` qui renvoie l'audio encodé en base64.
 
 ## Installation via HACS (one-click)
 
@@ -97,8 +101,9 @@ Options → Mistral Voice :
 | --- | --- | --- |
 | **Modèle de chat Mistral** | `mistral-small-latest` | Choisi dans une liste **dynamique** alimentée par `GET /v1/models` (modèles de chat, alias `-latest` en premier) ; une valeur personnalisée peut être saisie. |
 | **Rafraîchir les modèles** | décoché | Cocher puis valider pour réinterroger la liste des modèles sans enregistrer. |
-| **Langue de transcription** | `fr` | Langue passée à la session de transcription (`fr`, `en`, `de`, `es`, `it`). |
+| **Langue de transcription** | `fr` | Langue passée à la session de transcription (`fr`, `en`, `de`, `es`, `it`) ; le fournisseur TTS ne sert que les pipelines dans cette langue. |
 | **Délai de streaming cible** | `480` | `target_streaming_delay_ms` en ms, plage **80–2400**. |
+| **Voix de synthèse vocale** | (vide = voix par défaut) | Identifiant d'une voix Mistral (préréglée ou clonée) passé à `POST /v1/audio/speech`. |
 | **Pre-prompt système** | (vide = pre-prompt français intégré) | Surcharge du pre-prompt par défaut. |
 
 En cas d'API injoignable pendant le rafraîchissement : une erreur est
@@ -163,6 +168,26 @@ le pipeline Assist :
 5. En cas d'erreur (API injoignable, outil en échec), une réponse polie en
    français est renvoyée : pas d'exception exposée, jamais de secret.
 
+### Synthèse vocale (TTS)
+
+L'intégration fournit un fournisseur TTS, entité **« Synthèse vocale
+(Mistral) »**, implémentant `TextToSpeechEntity`. À chaque réponse de
+l'agent de conversation :
+
+1. Le pipeline transmet le texte à parler ; l'entité appelle
+   `POST /v1/audio/speech` (`voxtral-mini-tts-2603`) en un seul appel
+   HTTPS sortant, avec la voix de l'option si renseignée.
+2. L'API renvoie l'audio encodé en base64 (`audio_data`) ; l'entité le
+   décode et le rend au pipeline au format MP3, joué par le satellite.
+3. En cas d'échec (API injoignable, contenu refusé par la modération),
+   l'erreur remonte au pipeline en `HomeAssistantError` générique —
+   jamais de clé ni de texte parlé dans les logs.
+
+Le modèle de synthèse vocale est fixe (`voxtral-mini-tts-2603`) ; la langue
+supportée suit l'option **Langue de transcription** (le pipeline utilise
+STT et TTS dans la même langue) et l'entité partage l'appareil de service
+du fournisseur STT.
+
 ## FAQ
 
 **Q : Où ma clé API est-elle stockée ?**
@@ -190,7 +215,9 @@ Pour la transcription, le modèle temps réel actuellement supporté est
 R : Vérifiez que les entités visées sont **exposées à Assist** (Paramètres →
 Appareils et services → Assistants vocaux → entités exposées) et que le
 pipeline utilisé a Mistral Voice comme agent de **conversation** et comme
-fournisseur **STT**.
+fournisseur **STT**. Vérifiez aussi que le pipeline a bien l'entité
+**« Synthèse vocale (Mistral) »** comme fournisseur **TTS** : sans lui,
+les commandes sont comprises et exécutées mais rien n'est parlé.
 
 **Q : Comment faire une capture d'écran sans exposer de secret ?**
 R : Ne le faites pas : masquez tout champ de clé (HA masque déjà la saisie)
@@ -199,7 +226,8 @@ floutez l'image.
 
 **Q : L'intégration fonctionne hors ligne ?**
 R : Non, elle est 100 % cloud (ADR-0001) : sans réseau vers
-`api.mistral.ai`, la transcription et la conversation renvoient des erreurs
+`api.mistral.ai`, la transcription, la conversation et la synthèse vocale
+renvoient des erreurs
 polies, et l'intégration récupère automatiquement dès que le réseau revient.
 
 ## Tests manuels (à passer avant chaque release)
@@ -210,7 +238,8 @@ polies, et l'intégration récupère automatiquement dès que le réseau revient
    (ou ajouter le dépôt manuellement, catégorie **Intégration**).
 2. Installer, redémarrer HA, ajouter l'intégration (clé API).
 3. Attendu : l'entrée apparaît dans Paramètres → Appareils et services, avec
-   une entité **« Transcription (Mistral) »** (STT) et l'agent **Mistral
+   une entité **« Transcription (Mistral) »** (STT), une entité
+   **« Synthèse vocale (Mistral) »** (TTS) et l'agent **Mistral
    Voice** sélectionnable comme agent de conversation.
 
 ### 2. STT streamé (debug du pipeline)
@@ -218,7 +247,7 @@ polies, et l'intégration récupère automatiquement dès que le réseau revient
 1. Paramètres → Voice assistants → votre pipeline → **Débug** (ou Settings →
    Voice assistants → Debug).
 2. Vérifier que le **STT** du pipeline est l'entité **Transcription
-   (Mistral)**.
+   (Mistral)** et le **TTS** l'entité **Synthèse vocale (Mistral)**.
 3. Depuis le satellite Voice PE (ou le bouton micro du debug), dicter une
    phrase (ex. « Quelle heure est-il ? »).
 4. Attendu : « Texte reconnu » s'affiche **en flux** (deltas puis texte
@@ -307,8 +336,9 @@ clé n'est loguée), CI GitHub Actions sur chaque PR (hassfest + ruff).
 Les tests couvrent la logique pure (conversion des outils, filtrage des
 modèles + préférence `-latest`, pre-prompt par défaut, plage
 `target_streaming_delay_ms` 80–2400) et les comportements externes
-(config flow, options, STT nominal/erreur/fermeture, boucle tool calling,
-erreur API → valeur de modèle conservée et réponse polie).
+(config flow, options, STT nominal/erreur/fermeture, TTS nominal/erreur,
+boucle tool calling, erreur API → valeur de modèle conservée et réponse
+polie).
 
 ## Licence
 

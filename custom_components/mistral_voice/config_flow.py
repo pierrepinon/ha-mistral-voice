@@ -35,10 +35,12 @@ from .const import (
     CONF_REFRESH_MODELS,
     CONF_STREAMING_DELAY_MS,
     CONF_SYSTEM_PROMPT,
+    CONF_VOICE,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DEFAULT_STREAMING_DELAY_MS,
     DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_VOICE,
     DOMAIN,
     MAX_STREAMING_DELAY_MS,
     MIN_STREAMING_DELAY_MS,
@@ -119,6 +121,9 @@ def _options_schema(
                 )
             ),
             vol.Required(
+                CONF_VOICE, default=current.get(CONF_VOICE, DEFAULT_VOICE)
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Required(
                 CONF_SYSTEM_PROMPT, default=current.get(CONF_SYSTEM_PROMPT, "")
             ): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
@@ -139,6 +144,7 @@ def _normalise_options(user_input: Mapping[str, Any]) -> dict[str, Any]:
         CONF_STREAMING_DELAY_MS: int(user_input[CONF_STREAMING_DELAY_MS]),
         CONF_SYSTEM_PROMPT: str(user_input.get(CONF_SYSTEM_PROMPT) or ""),
         CONF_MODEL: str(user_input.get(CONF_MODEL) or DEFAULT_MODEL),
+        CONF_VOICE: str(user_input.get(CONF_VOICE) or ""),
     }
 
 
@@ -212,7 +218,8 @@ class MistralVoiceOptionsFlow(config_entries.OptionsFlow):
 
     `self.config_entry` est résolu à l'exécution par le flow manager :
     la clé API n'est jamais lue ni affichée ici, les options ne portent
-    que sur la langue, le délai de streaming, le pre-prompt et le modèle.
+    que sur la langue, le délai de streaming, le pre-prompt, le modèle
+    et la voix de synthèse vocale.
 
     Le sélecteur de modèles est alimenté dynamiquement par
     GET /v1/models (`client.models.list()`), filtré aux modèles de chat

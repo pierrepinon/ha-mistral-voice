@@ -4,6 +4,31 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.1.0] — Synthèse vocale (TTS)
+
+### Ajouté
+
+- Fournisseur **TTS** pour le Pipeline Assist : l'entité
+  **« Synthèse vocale (Mistral) »** synthétise la réponse de l'agent de
+  conversation en un appel unique `POST /v1/audio/speech`
+  (`client.audio.speech.complete`, SDK `mistralai==3.7.0`), modèle de
+  synthèse vocale `voxtral-mini-tts-2603`. L'audio renvoyé en base64
+  (`audio_data`) est décodé et rendu au pipeline au format MP3, joué par
+  le satellite vocal. Comme le fournisseur STT, la langue supportée suit
+  l'option `language` et l'entité partage le même appareil de service.
+- Option **« Voix de synthèse vocale »** : identifiant d'une voix Mistral
+  (préréglée ou clonée dans le compte) passé à `POST /v1/audio/speech` ;
+  vide = voix par défaut de l'API.
+- En cas d'échec (API injoignable, modération du contenu), l'erreur
+  remonte au pipeline en `HomeAssistantError` générique : jamais de clé
+  API, de texte parlé ni de détail de requête dans les logs.
+- Onze nouveaux tests : nominal (bytes MP3 décodés), voix transmise
+  (absente de l'appel quand vide), erreurs API, réponse sans audio et
+  base64 invalide en `HomeAssistantError`, langues suivant les options,
+  chargement/déchargement de la plateforme `tts` (appareil partagé avec
+  le STT), plus trois tests du client API (`voice_id` conditionnel,
+  enrobage des erreurs SDK).
+
 ## [1.0.2] — Réponses en liste de parties (modèles raisonnement)
 
 ### Corrigé

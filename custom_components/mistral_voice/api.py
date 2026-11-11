@@ -6,7 +6,9 @@ uniquement vers api.mistral.ai — ADR 0001) :
 - `client.models.list()` → GET /v1/models (alimente le sélecteur
   dynamique de modèles, jamais de liste statique en dur) ;
 - `client.chat.complete(...)` → POST /v1/chat/completions
-  (l'agent de conversation, tickets suivants).
+  (l'agent de conversation, tickets suivis) ;
+- `client.audio.speech.complete(...)` → POST /v1/audio/speech
+  (la synthèse vocale, réponse en audio base64 `audio_data`).
 
 La clé API ne vit que dans `entry.data[CONF_API_KEY]` : elle est passée
 au constructeur du SDK et n'est jamais loguée, relue, ni incluse dans un
@@ -165,4 +167,37 @@ async def async_chat_complete(
     except Exception as err:
         raise MistralApiError(
             "POST /v1/chat/completions a échoué : API injoignable ou réponse invalide."
+        ) from err
+
+
+async def async_speech_complete(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    model: str,
+    text: str,
+    response_format: str,
+    voice_id: str | None = None,
+) -> Any:
+    """POST /v1/audio/speech via `client.audio.speech.complete` (hors boucle event).
+
+    La réponse du SDK porte l'audio encodé en base64 (`audio_data`).
+    `voice_id` n'est transmis que s'il est renseigné : vide, l'API
+    utilise sa voix par défaut.
+    """
+    client = get_data(hass, entry).get_client()
+    call_kwargs: dict[str, Any] = {
+        "model": model,
+        "input": text,
+        "response_format": response_format,
+    }
+    if voice_id:
+        call_kwargs["voice_id"] = voice_id
+    try:
+        return await hass.async_add_executor_job(
+            partial(client.audio.speech.complete, **call_kwargs)
+        )
+    except Exception as err:
+        raise MistralApiError(
+            "POST /v1/audio/speech a échoué : API injoignable ou réponse invalide."
         ) from err

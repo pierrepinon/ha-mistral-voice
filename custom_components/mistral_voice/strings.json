@@ -20,16 +20,18 @@
     "step": {
       "init": {
         "title": "Options de Mistral Voice",
-        "description": "Configurez le modèle de chat, la langue de transcription, le délai de streaming et le pre-prompt. La liste des modèles est chargée depuis l'API Mistral (GET /v1/models).",
+        "description": "Configurez le modèle de chat, la langue de transcription, le délai de streaming, le pre-prompt et la voix de synthèse vocale. La liste des modèles est chargée depuis l'API Mistral (GET /v1/models).",
         "data": {
           "model": "Modèle de chat Mistral",
           "language": "Langue de transcription",
           "target_streaming_delay_ms": "Délai de streaming cible (ms)",
+          "voice": "Voix de synthèse vocale (vide = voix par défaut)",
           "system_prompt": "Pre-prompt système (vide = pré-prompt par défaut)",
           "refresh_models": "Rafraîchir les modèles"
         },
         "data_description": {
           "model": "Liste alimentée en direct par GET /v1/models (modèles de chat, alias « -latest » en premier) ; une valeur personnalisée peut être saisie.",
+          "voice": "Identifiant d'une voix Mistral (préréglée ou clonée) passé à POST /v1/audio/speech ; vide = voix par défaut de l'API.",
           "refresh_models": "Cochez puis validez pour réinterroger la liste des modèles avant de réafficher ce formulaire."
         }
       }
@@ -45,6 +47,11 @@
     "stt": {
       "mistral_stt": {
         "name": "Transcription (Mistral)"
+      }
+    },
+    "tts": {
+      "mistral_tts": {
+        "name": "Synthèse vocale (Mistral)"
       }
     }
   }

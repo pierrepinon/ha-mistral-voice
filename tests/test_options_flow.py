@@ -32,10 +32,12 @@ from custom_components.mistral_voice.const import (
     CONF_REFRESH_MODELS,
     CONF_STREAMING_DELAY_MS,
     CONF_SYSTEM_PROMPT,
+    CONF_VOICE,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
     DEFAULT_STREAMING_DELAY_MS,
     DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_VOICE,
     DOMAIN,
     MAX_STREAMING_DELAY_MS,
     MIN_STREAMING_DELAY_MS,
@@ -152,6 +154,7 @@ def _defaults() -> dict[str, Any]:
         CONF_STREAMING_DELAY_MS: DEFAULT_STREAMING_DELAY_MS,
         CONF_SYSTEM_PROMPT: "",
         CONF_MODEL: DEFAULT_MODEL,
+        CONF_VOICE: DEFAULT_VOICE,
     }
 
 
@@ -174,6 +177,7 @@ async def test_options_form_shows_defaults(hass: HomeAssistant) -> None:
     assert schema_map[CONF_LANGUAGE].default() == DEFAULT_LANGUAGE
     assert schema_map[CONF_STREAMING_DELAY_MS].default() == DEFAULT_STREAMING_DELAY_MS
     assert schema_map[CONF_SYSTEM_PROMPT].default() == ""
+    assert schema_map[CONF_VOICE].default() == DEFAULT_VOICE
     assert schema_map[CONF_REFRESH_MODELS].default() is False
 
 
@@ -193,6 +197,7 @@ async def test_options_defaults_saved(hass: HomeAssistant) -> None:
     assert entry.options[CONF_STREAMING_DELAY_MS] == DEFAULT_STREAMING_DELAY_MS
     assert entry.options[CONF_SYSTEM_PROMPT] == ""
     assert entry.options[CONF_MODEL] == DEFAULT_MODEL
+    assert entry.options[CONF_VOICE] == DEFAULT_VOICE
     # La case de rafraîchissement n'est jamais persistée.
     assert CONF_REFRESH_MODELS not in entry.options
 
@@ -210,6 +215,7 @@ async def test_options_override_saved(hass: HomeAssistant) -> None:
                 CONF_STREAMING_DELAY_MS: 600,
                 CONF_SYSTEM_PROMPT: "Réponds très brièvement.",
                 CONF_MODEL: "mistral-large-latest",
+                CONF_VOICE: "voice-42",
             },
         )
         await hass.async_block_till_done()
@@ -220,6 +226,7 @@ async def test_options_override_saved(hass: HomeAssistant) -> None:
         CONF_STREAMING_DELAY_MS: 600,
         CONF_SYSTEM_PROMPT: "Réponds très brièvement.",
         CONF_MODEL: "mistral-large-latest",
+        CONF_VOICE: "voice-42",
     }
 
 
