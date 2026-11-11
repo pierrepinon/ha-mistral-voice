@@ -3,7 +3,7 @@
 Le pipeline Assist fournit le texte à parler (sortie de l'agent de
 conversation) ; l'entité le synthétise en un seul appel HTTPS sortant vers
 ``POST /v1/audio/speech`` (ADR 0001) via
-``client.audio.speech.complete(model=voxtral-mini-tts-2603, input=…)``.
+``client.audio.speech.complete(model=voxtral-mini-tts-3-0, input=…)``.
 L'API renvoie l'audio encodé en base64 (``audio_data``) au format MP3 :
 décodé en bytes et rendu au pipeline comme tout fichier TTS, avec
 l'extension ``mp3`` — le satellite vocal joue ensuite l'annonce.

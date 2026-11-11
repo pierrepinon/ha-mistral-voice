@@ -29,10 +29,11 @@ DEFAULT_MODEL = "mistral-small-latest"
 # compte Mistral ; vide = voix par défaut de l'API.
 DEFAULT_VOICE = ""
 
-# Synthèse vocale : appel POST /v1/audio/speech. Le modèle de TTS est fixe
-# (seul modèle de l'offre Mistral) ; la réponse est demandée en MP3
+# Synthèse vocale : appel POST /v1/audio/speech. Le modèle de TTS est fixe :
+# Voxtral TTS 3 (remplace le v2 `voxtral-mini-tts-2603`, déprécié par Mistral),
+# qui garde les mêmes paramètres d'appel ; la réponse est demandée en MP3
 # (extension renvoyée au Pipeline Assist, l'audio part décodé en bytes).
-TTS_MODEL = "voxtral-mini-tts-2603"
+TTS_MODEL = "voxtral-mini-tts-3-0"
 TTS_AUDIO_FORMAT = "mp3"
 
 # Langues de transcription pour le champ `language` des options.

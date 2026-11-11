@@ -12,10 +12,12 @@ et le versionnage suit [SemVer](https://semver.org/lang/fr/).
   **« Synthèse vocale (Mistral) »** synthétise la réponse de l'agent de
   conversation en un appel unique `POST /v1/audio/speech`
   (`client.audio.speech.complete`, SDK `mistralai==3.7.0`), modèle de
-  synthèse vocale `voxtral-mini-tts-2603`. L'audio renvoyé en base64
-  (`audio_data`) est décodé et rendu au pipeline au format MP3, joué par
-  le satellite vocal. Comme le fournisseur STT, la langue supportée suit
-  l'option `language` et l'entité partage le même appareil de service.
+  synthèse vocale **Voxtral TTS 3** (`voxtral-mini-tts-3-0`, la v2
+  `voxtral-mini-tts-2603` étant dépréciée par Mistral). L'audio renvoyé
+  en base64 (`audio_data`) est décodé et rendu au pipeline au format
+  MP3, joué par le satellite vocal. Comme le fournisseur STT, la langue
+  supportée suit l'option `language` et l'entité partage le même appareil
+  de service.
 - Option **« Voix de synthèse vocale »** : identifiant d'une voix Mistral
   (préréglée ou clonée dans le compte) passé à `POST /v1/audio/speech` ;
   vide = voix par défaut de l'API.

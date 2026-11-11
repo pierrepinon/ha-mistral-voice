@@ -175,7 +175,7 @@ L'intégration fournit un fournisseur TTS, entité **« Synthèse vocale
 l'agent de conversation :
 
 1. Le pipeline transmet le texte à parler ; l'entité appelle
-   `POST /v1/audio/speech` (`voxtral-mini-tts-2603`) en un seul appel
+   `POST /v1/audio/speech` (`voxtral-mini-tts-3-0`) en un seul appel
    HTTPS sortant, avec la voix de l'option si renseignée.
 2. L'API renvoie l'audio encodé en base64 (`audio_data`) ; l'entité le
    décode et le rend au pipeline au format MP3, joué par le satellite.
@@ -183,7 +183,7 @@ l'agent de conversation :
    l'erreur remonte au pipeline en `HomeAssistantError` générique —
    jamais de clé ni de texte parlé dans les logs.
 
-Le modèle de synthèse vocale est fixe (`voxtral-mini-tts-2603`) ; la langue
+Le modèle de synthèse vocale est fixe (`voxtral-mini-tts-3-0`) ; la langue
 supportée suit l'option **Langue de transcription** (le pipeline utilise
 STT et TTS dans la même langue) et l'entité partage l'appareil de service
 du fournisseur STT.

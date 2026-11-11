@@ -225,14 +225,14 @@ async def test_speech_complete_passes_model_text_and_format(hass) -> None:
         response = await api.async_speech_complete(
             hass,
             entry,
-            model="voxtral-mini-tts-2603",
+            model="voxtral-mini-tts-3-0",
             text="Bonjour",
             response_format="mp3",
         )
 
     assert response is complete.return_value
     complete.assert_called_once_with(
-        model="voxtral-mini-tts-2603", input="Bonjour", response_format="mp3"
+        model="voxtral-mini-tts-3-0", input="Bonjour", response_format="mp3"
     )
 
 
@@ -251,7 +251,7 @@ async def test_speech_complete_passes_voice_only_when_set(hass) -> None:
         await api.async_speech_complete(
             hass,
             entry,
-            model="voxtral-mini-tts-2603",
+            model="voxtral-mini-tts-3-0",
             text="Bonjour",
             response_format="mp3",
             voice_id="",
@@ -261,7 +261,7 @@ async def test_speech_complete_passes_voice_only_when_set(hass) -> None:
         await api.async_speech_complete(
             hass,
             entry,
-            model="voxtral-mini-tts-2603",
+            model="voxtral-mini-tts-3-0",
             text="Bonjour",
             response_format="mp3",
             voice_id="voice-42",
@@ -289,7 +289,7 @@ async def test_async_speech_complete_wraps_sdk_errors(hass) -> None:
         await api.async_speech_complete(
             hass,
             entry,
-            model="voxtral-mini-tts-2603",
+            model="voxtral-mini-tts-3-0",
             text="Bonjour",
             response_format="mp3",
         )
