@@ -484,7 +484,9 @@ async def test_content_deltas_streamed_to_listener(
 async def test_chat_call_parameters(
     hass, entry, agent, fake_llm_api, monkeypatch
 ) -> None:
-    """max_tokens capé (~150), tool_choice auto, model = option (défaut)."""
+    """max_tokens capé (plafond de sécurité), tool_choice auto,
+    model = option (défaut).
+    """
     chat = ChatStreamMock([[make_delta(content="Bonjour.")]])
     monkeypatch.setattr(conv, "async_chat_complete_stream", chat)
 

@@ -192,8 +192,9 @@ async def async_speech_complete(
     """POST /v1/audio/speech via `client.audio.speech.complete` (hors boucle event).
 
     La réponse du SDK porte l'audio encodé en base64 (`audio_data`).
-    `voice_id` n'est transmis que s'il est renseigné : vide, l'API
-    utilise sa voix par défaut.
+    `voice_id` n'est transmis que s'il est renseigné — le repli sur
+    `DEFAULT_VOICE` quand l'option est vide se fait côté entité TTS
+    (Voxtral TTS 3 refuse les requêtes sans voix).
     """
     client = get_data(hass, entry).get_client()
     call_kwargs: dict[str, Any] = {
@@ -258,8 +259,9 @@ async def async_speech_stream(
 
     Renvoie un `EventStreamAsync` d'événements `SpeechStreamEvents`
     (delta `speech.audio.delta` puis `speech.audio.done`). `voice_id`
-    n'est transmis que s'il est renseigné : vide, l'API utilise sa voix
-    par défaut.
+    n'est transmis que s'il est renseigné — le repli sur `DEFAULT_VOICE`
+    quand l'option est vide se fait côté entité TTS (Voxtral TTS 3
+    refuse les requêtes sans voix).
     """
     client = get_data(hass, entry).get_client()
     call_kwargs: dict[str, Any] = {

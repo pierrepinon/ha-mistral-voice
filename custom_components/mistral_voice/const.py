@@ -26,13 +26,16 @@ MAX_STREAMING_DELAY_MS = 2400
 DEFAULT_MODEL = "mistral-small-latest"
 
 # Voix de synthèse vocale : identifiant d'une voix (préréglée ou clonée) du
-# compte Mistral ; vide = voix par défaut de l'API.
-DEFAULT_VOICE = ""
+# compte Mistral. Voxtral TTS 3 REFUSE les requêtes sans voix (400 « Either
+# ref_audio or voice must be provided ») : l'option vide retombe sur cette
+# voix de repli documentée (Marie, française — cf. bibliothèque de voix
+# préconfigurées Voxtral 3 de la doc Mistral).
+DEFAULT_VOICE = "voice_592"
 
 # Synthèse vocale : appel POST /v1/audio/speech. Le modèle de TTS est fixe :
 # Voxtral TTS 3 (remplace le v2 `voxtral-mini-tts-2603`, déprécié par Mistral),
-# qui garde les mêmes paramètres d'appel. L'option `voice` (vide = voix par
-# défaut de l'API) est commune aux deux chemins audio :
+# qui garde les mêmes paramètres d'appel. L'option `voice` (vide = voix de
+# repli `DEFAULT_VOICE`) est commune aux deux chemins audio :
 # - sans flux (service tts.speak, cache) : réponse audio complète en base64 ;
 # - en flux (async_stream_tts_audio, pipeline Assist / satellite) :
 #   événements `speech.audio.delta` au fil de l'eau. L'entité `tts` annonce
@@ -60,7 +63,12 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 # Conversation : appels POST /v1/chat/completions en flux (SSE, SDK async).
-MAX_TOKENS = 150
+# Plafond de sécurité uniquement — la concision vient du pre-prompt. Il
+# doit laisser la place au raisonnement des modèles qui raisonnent dans
+# le même budget (leurs tokens de réflexion précèdent le texte parlé) ;
+# à 150, un tour de raisonnement suffisamment long produisait une
+# réponse sans aucun texte -> réponse polie d'erreur.
+MAX_TOKENS = 1024
 TOOL_CHOICE_AUTO = "auto"
 
 # Boucle de tool calling : nombre max d'allers-retours avec le modèle,

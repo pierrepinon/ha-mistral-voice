@@ -41,6 +41,7 @@ from custom_components.mistral_voice.const import (
     CONF_LANGUAGE,
     CONF_VOICE,
     DEFAULT_LANGUAGE,
+    DEFAULT_VOICE,
     DOMAIN,
 )
 import custom_components.mistral_voice.tts as tts_module
@@ -118,7 +119,28 @@ async def test_nominal_tts(hass) -> None:
     assert call_kwargs["model"] == tts_module.TTS_MODEL
     assert call_kwargs["text"] == "Bonjour, la maison est à vous."
     assert call_kwargs["response_format"] == "mp3"
-    assert call_kwargs["voice_id"] is None
+    # Voxtral TTS 3 refuse les requêtes sans voix (400) : l'option vide
+    # doit retomber sur la voix de repli documentée.
+    assert call_kwargs["voice_id"] == DEFAULT_VOICE
+
+
+async def test_empty_voice_option_falls_back_to_default(hass) -> None:
+    """Pattern exact du bug 400 : option voice présente mais vide.
+
+    Le formulaire d'options stocke toujours la clé (chaîne vide) ; la
+    voix de repli doit partir dans l'appel complet — sinon Voxtral TTS 3
+    rejette la requête en 400 et aucun audio n'est joué.
+    """
+    with patch.object(
+        tts_module,
+        "async_speech_complete",
+        AsyncMock(return_value=_response()),
+    ) as speech:
+        _, entity = await _make_entity(hass, options={CONF_VOICE: ""})
+
+        await entity.async_get_tts_audio("Bonjour", "fr", {})
+
+    assert speech.call_args.kwargs["voice_id"] == DEFAULT_VOICE
 
 
 async def test_voice_option_transmitted(hass) -> None:
@@ -228,7 +250,34 @@ async def test_stream_nominal(hass) -> None:
     assert call_kwargs["text"] == "Salut le monde."
     assert call_kwargs["response_format"] == "wav"
     assert call_kwargs["model"] == tts_module.TTS_MODEL
-    assert call_kwargs["voice_id"] is None
+    # Voxtral TTS 3 exige une voix : l'option vide retombe sur le repli.
+    assert call_kwargs["voice_id"] == DEFAULT_VOICE
+
+
+async def test_stream_empty_voice_option_falls_back_to_default(hass) -> None:
+    """Pattern exact du bug 400 en flux : option voice présente mais vide.
+
+    Le formulaire d'options stocke toujours la clé (chaîne vide) ; la voix
+    de repli doit partir dans l'appel en flux, sinon le pipeline Assist
+    échoue (400 Voxtral TTS 3, aucun audio sur le satellite).
+    """
+    with patch.object(
+        tts_module,
+        "async_speech_stream",
+        AsyncMock(return_value=_stream([_audio_event(b"\x01mp3")])),
+    ) as stream_mock:
+        _, entity = await _make_entity(hass, options={CONF_VOICE: ""})
+
+        response = await entity.async_stream_tts_audio(
+            TTSAudioRequest(
+                language="fr",
+                options={ATTR_PREFERRED_FORMAT: "wav"},
+                message_gen=_message_gen(["Salut le monde."]),
+            )
+        )
+
+    assert response.extension == "wav"
+    assert stream_mock.call_args.kwargs["voice_id"] == DEFAULT_VOICE
 
 
 async def test_stream_default_and_unknown_format_fall_back_to_mp3(hass) -> None:

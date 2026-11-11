@@ -26,7 +26,9 @@ La langue supportée suit l'option ``language`` de l'entrée (comme le
 fournisseur STT) : un rechargement de l'entrée (déclenché à la
 modification des options) recrée l'entité et met la valeur à jour. La
 voix est optionnelle : l'option ``voice`` contient l'identifiant d'une
-voix Mistral (préréglée ou clonée), vide = voix par défaut de l'API.
+voix Mistral (préréglée ou clonée), vide = voix de repli
+``DEFAULT_VOICE`` — Voxtral TTS 3 refuse les requêtes sans voix (400
+« Either ref_audio or voice must be provided »).
 
 En cas d'échec (API injoignable, modération du contenu…), l'erreur est
 journalisée en mode générique — jamais de clé API ni de détail de
@@ -151,7 +153,7 @@ class MistralVoiceTTSEntity(TextToSpeechEntity):
         Les erreurs remontent au pipeline en ``HomeAssistantError`` sans
         jamais exposer la clé ni la requête.
         """
-        voice_id = str(self.entry.options.get(CONF_VOICE, DEFAULT_VOICE))
+        voice_id = str(self.entry.options.get(CONF_VOICE) or DEFAULT_VOICE)
         response_format = _preferred_format(options)
         _LOGGER.debug(
             "Synthèse vocale : annonce de %d caractères (langue %s).",
@@ -202,7 +204,7 @@ class MistralVoiceTTSEntity(TextToSpeechEntity):
         l'eau et diffusés au pipeline chunk par chunk.
         """
         message = "".join([chunk async for chunk in request.message_gen])
-        voice_id = str(self.entry.options.get(CONF_VOICE, DEFAULT_VOICE))
+        voice_id = str(self.entry.options.get(CONF_VOICE) or DEFAULT_VOICE)
         response_format = _preferred_format(request.options)
         _LOGGER.debug(
             "Synthèse vocale en flux : annonce de %d caractères (langue %s, "

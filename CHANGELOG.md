@@ -4,6 +4,31 @@ Toutes les évolutions notables de ce projet sont documentées ici.
 Le format s'inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le versionnage suit [SemVer](https://semver.org/lang/fr/).
 
+## [1.2.1] — Synthèse vocale : voix de repli obligatoire
+
+### Corrigé
+
+- **L'audio n'était jamais joué sur l'enceinte** : les modèles Voxtral
+  TTS 3 (`voxtral-mini-tts-3-0`) refusent les requêtes sans voix
+  (`400 Either ref_audio or voice must be provided`, cf. « Common
+  issues » de la doc Mistral — le v2 `voxtral-mini-tts-2603` tolérait
+  l'omission). L'option « Voix de synthèse vocale » vide envoyait
+  donc chaque appel `POST /v1/audio/speech` vers une erreur 400,
+  masquée en échec générique. Une option vide retombe maintenant sur
+  la voix de repli intégrée `voice_592` (Marie, française,
+  bibliothèque de voix préconfigurées Voxtral 3) ; une voix saisie
+  continue d'être transmise telle quelle. Tests de régression sur les
+  deux chemins (avec flux et sans flux) : l'appel API doit toujours
+  recevoir un `voice_id`.
+
+- **Réponse parfois sans texte (erreur « unknown » dans le debug)** :
+  le plafond `max_tokens` passe de 150 à 1024. Ces tokens sont un
+  plafond de sécurité, pas un objectif — la concision vient du
+  pre-prompt. À 150, les modèles qui raisonnent dans le même budget
+  (tokens de réflexion avant le texte) pouvaient épuiser le plafond
+  sans produire le moindre texte : le tour se terminait sans contenu
+  assistant et l'agent renvoyait sa réponse polie d'erreur.
+
 ## [1.2.0] — Mémoire de conversation et streaming (agent & TTS)
 
 ### Ajouté
@@ -62,7 +87,9 @@ et le versionnage suit [SemVer](https://semver.org/lang/fr/).
   de service.
 - Option **« Voix de synthèse vocale »** : identifiant d'une voix Mistral
   (préréglée ou clonée dans le compte) passé à `POST /v1/audio/speech` ;
-  vide = voix par défaut de l'API.
+  vide = voix par défaut de l'API *(précisé en 1.2.1 : Voxtral TTS 3
+  exige une voix, la valeur vide retombe en fait sur la voix de repli
+  `voice_592`)*.
 - En cas d'échec (API injoignable, modération du contenu), l'erreur
   remonte au pipeline en `HomeAssistantError` générique : jamais de clé
   API, de texte parlé ni de détail de requête dans les logs.
